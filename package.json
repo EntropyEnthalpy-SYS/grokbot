@@ -11,7 +11,7 @@
     "start": "node src/main.ts",
     "login": "node scripts/login.ts",
     "probe": "node scripts/probe.ts",
-    "test": "node --test test/",
+    "test": "node --test 'test/**/*.test.ts'",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test"
   },
