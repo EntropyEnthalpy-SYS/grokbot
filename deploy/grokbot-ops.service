@@ -1,0 +1,7 @@
+[Unit]
+Description=grokbot ops runner (fixed list of actions: restart, update, logs, status)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/grokbot/deploy/grokbot-ops.sh
+TimeoutStartSec=15min

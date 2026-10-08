@@ -1,0 +1,10 @@
+[Unit]
+Description=Update yt-dlp (video sites change often)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/yt-dlp/bin/pip install --quiet --upgrade "yt-dlp[default,curl-cffi]"
+ExecStart=/opt/parsehub/bin/pip install --quiet --upgrade parsehub
+ExecStart=/usr/bin/systemctl try-restart grokbot-parsehub.service

@@ -1,0 +1,26 @@
+[Unit]
+Description=grokbot - Telegram AI bot on a Grok subscription
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=grokbot
+Group=grokbot
+WorkingDirectory=/opt/grokbot
+# BOT_TOKEN, OWNER_ID, DATA_DIR, GROK_MODEL
+EnvironmentFile=/etc/grokbot.env
+ExecStart=/usr/bin/node src/main.ts
+Restart=on-failure
+RestartSec=5
+
+# Hardening: the bot only needs its data directory and the network.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/grokbot
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

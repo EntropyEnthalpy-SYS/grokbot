@@ -1,0 +1,6 @@
+[Unit]
+Description=grokbot watchdog: restart hung or stopped services and alert the owner
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/grokbot/deploy/grokbot-watchdog.sh

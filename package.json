@@ -1,0 +1,37 @@
+{
+  "name": "grokbot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A lightweight Telegram group assistant that runs on your Grok (and ChatGPT/Claude) subscription: answers, link and video cards, translation, reminders, images, voice, with an admin panel in Telegram.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "login": "node scripts/login.ts",
+    "probe": "node scripts/probe.ts",
+    "test": "node --test test/",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^1.1.0",
+    "@earendil-works/pi-ai": "^1.1.0",
+    "grammy": "^1.46.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2"
+  },
+  "license": "MIT",
+  "keywords": [
+    "telegram",
+    "bot",
+    "grok",
+    "xai",
+    "llm",
+    "grammy",
+    "pi-ai"
+  ]
+}

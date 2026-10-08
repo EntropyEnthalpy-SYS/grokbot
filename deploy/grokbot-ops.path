@@ -1,0 +1,8 @@
+[Unit]
+Description=Run grokbot owner actions requested from /admin
+
+[Path]
+PathExistsGlob=/var/lib/grokbot/ops/request-*.json
+
+[Install]
+WantedBy=paths.target

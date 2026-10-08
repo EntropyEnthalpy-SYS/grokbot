@@ -1,0 +1,36 @@
+[Unit]
+Description=grokbot ParseHub helper (parses Douyin/Weibo/XHS/... posts for the bot, localhost only)
+After=network-online.target
+Wants=network-online.target
+Before=grokbot.service
+
+[Service]
+Type=simple
+User=grokbot
+Group=grokbot
+WorkingDirectory=/opt/grokbot/sidecar
+Environment=PARSEHUB_PORT=8765
+Environment=PARSEHUB_MEDIA_DIR=/var/lib/grokbot/media
+Environment=PARSEHUB_CONFIG=/etc/grokbot-parsehub.json
+Environment=HOME=/var/lib/grokbot
+ExecStart=/opt/parsehub/bin/python parsehub_server.py
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/grokbot
+MemoryMax=768M
+# Load-bearing SSRF defense: ParseHub follows share-link redirects and fetches media URLs the
+# platforms return, which the host allowlist in parsehub_server.py can't re-check. Loopback must stay
+# reachable (bot, DNS stub, SOCKS tunnel); the local Bot API on loopback needs the bot token in the URL.
+# Defense in depth against SSRF through share-link redirects: no private, link-local
+# (cloud metadata) or CGNAT addresses. Loopback stays open for the bot, the DNS stub
+# resolver (127.0.0.53) and the SOCKS tunnel (127.0.0.1:1080).
+IPAddressAllow=localhost
+IPAddressDeny=link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7
+
+[Install]
+WantedBy=multi-user.target

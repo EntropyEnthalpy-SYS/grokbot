@@ -1,0 +1,26 @@
+[Unit]
+Description=Telegram Local Bot API server for grokbot (2000 MB files, localhost only)
+After=network-online.target
+Wants=network-online.target
+Before=grokbot.service
+
+[Service]
+Type=simple
+User=grokbot
+Group=grokbot
+# TELEGRAM_API_ID / TELEGRAM_API_HASH from https://my.telegram.org
+EnvironmentFile=/etc/grokbot.env
+ExecStart=/usr/local/bin/telegram-bot-api --api-id=${TELEGRAM_API_ID} --api-hash=${TELEGRAM_API_HASH} --local \
+  --http-ip-address=127.0.0.1 --http-port=8081 \
+  --dir=/var/lib/grokbot/tgapi --temp-dir=/var/lib/grokbot/tgapi-tmp --verbosity=1
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/grokbot
+
+[Install]
+WantedBy=multi-user.target

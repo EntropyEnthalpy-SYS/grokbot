@@ -1,0 +1,18 @@
+[Unit]
+Description=grokbot SOCKS5 tunnel to a second server (for sites that block the main VPS, e.g. Bilibili)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# TUNNEL_HOST, e.g. tunnel@proxy.example.com; the key only allows port forwarding there.
+EnvironmentFile=/etc/grokbot-tunnel/env
+ExecStart=/usr/bin/ssh -N -D 127.0.0.1:1080 \
+  -i /etc/grokbot-tunnel/id_ed25519 -o UserKnownHostsFile=/etc/grokbot-tunnel/known_hosts -o StrictHostKeyChecking=yes \
+  -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o BatchMode=yes \
+  ${TUNNEL_HOST}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
