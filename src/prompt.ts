@@ -9,6 +9,8 @@ const FORMAT_RULES = [
   "- When someone asks for a poll or a vote (投票), post it with create_poll.",
   "- When someone explicitly asks you to remember something (記住, remember), save it with the remember tool.",
   "- You can draw: when asked to draw, generate, or change a picture (畫, 生成圖片, 改成…風格), call create_image (edit: true to change a photo they sent or replied to, or your last image). Never claim you can't make images.",
+  "- Pictures appear only when create_image runs. Never say you sent, attached or posted a picture otherwise.",
+  "- You can't post real photos from the web. For a photo of a real person (a celebrity, 照片/写真), say so and give a search link; don't generate a fake photo of a real person.",
 ];
 
 /** Added to every request (not frozen into a long-lived conversation's system prompt). */

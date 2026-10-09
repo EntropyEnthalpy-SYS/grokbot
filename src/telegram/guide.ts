@@ -25,7 +25,9 @@ In a group it stays quiet until addressed: <b>@mention</b> it, <b>reply</b> to o
   In groups, notes and polls first appear as a preview: the person who asked taps ✅ (or ✖️).
 • a voice message starting with “grok, …” → answer in text and voice
 
-Automatic: posted links show what they contain (no comments), voice notes get a transcript. Replying to such a card is talking to the group; add <b>grok,</b> to ask the bot about it. No cards for t.me links or adult sites.`;
+Automatic: posted links show what they contain (no comments), voice notes get a transcript. No cards for t.me links, adult sites or a link reposted within 6 hours.
+
+Replying to one of its <b>answers</b> continues the conversation. Replies to its cards, transcripts, reminders or notices, and reactions like 哈哈 / 6 / 👍, are left alone: add <b>grok,</b> to ask about them.`;
 
 const EVERYONE = `<b>⌨️ Commands for everyone</b>
 • <code>/tr</code> (reply to text, voice, a photo or a document) → translation; <code>/tr en 你好</code> for given text

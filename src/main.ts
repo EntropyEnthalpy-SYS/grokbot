@@ -193,12 +193,22 @@ await bot.start({
   onStart: (me) => console.log(`polling as @${me.username} (reads all group messages: ${me.can_read_all_group_messages})`),
 });
 
+/** Posts already written whose sending failed: retries send the same text instead of asking the AI again. */
+const writtenPosts = new Map<string, string>();
+
 /** /schedule: the bot writes the post at due time (with web search). Throws → retried each minute for an hour. */
 async function writeScheduledPost(reminder: Reminder): Promise<string> {
+  const key = `${reminder.id}@${reminder.dueAt}`;
+  const written = writtenPosts.get(key);
+  if (written) return written;
+  // Only the latest run of each post is worth keeping.
+  for (const old of writtenPosts.keys()) if (old.startsWith(`${reminder.id}@`)) writtenPosts.delete(old);
   const now = Date.now();
   const answer = await grok.ask(SCHEDULED_POST_PROMPT(now, reminders.zone(reminder.chatId)), reminder.text, { search: true });
   // One message: the first ~3000 characters (HTML tags add a little; Telegram's limit is 4096).
   const body = splitMarkdown(answer, 3000)[0] ?? answer.slice(0, 3000);
   usage.record(reminder.chatId, { id: reminder.userId ?? undefined, name: reminder.userName }, "card");
-  return `🗓 <b>${escapeHtml(reminder.text.slice(0, 200))}</b>\n\n${markdownToTelegramHtml(body)}`;
+  const post = `🗓 <b>${escapeHtml(reminder.text.slice(0, 200))}</b>\n\n${markdownToTelegramHtml(body)}`;
+  writtenPosts.set(key, post);
+  return post;
 }

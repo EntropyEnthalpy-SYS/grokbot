@@ -14,8 +14,9 @@ test("addressed by @mention (exact username, any case), text mention, or reply t
     isAddressedToBot(msg({ caption: "look Tokni", caption_entities: [{ type: "text_mention", offset: 5, length: 5, user: { id: 999, first_name: "T" } }] }), bot),
     true,
   );
-  assert.equal(isAddressedToBot(msg({ text: "ok", reply_to_message: msg({ message_id: 0, from: { id: 999, first_name: "T" } }) }), bot), true);
-  assert.equal(isAddressedToBot(msg({ text: "ok", reply_to_message: msg({ message_id: 0, from: { id: 2, first_name: "Bob" } }) }), bot), false);
+  assert.equal(isAddressedToBot(msg({ text: "how so?", reply_to_message: msg({ message_id: 0, from: { id: 999, first_name: "T" } }) }), bot), true);
+  assert.equal(isAddressedToBot(msg({ text: "how so?", reply_to_message: msg({ message_id: 0, from: { id: 2, first_name: "Bob" } }) }), bot), false);
+  assert.equal(isAddressedToBot(msg({ text: "ok", reply_to_message: msg({ message_id: 0, from: { id: 999, first_name: "T" } }) }), bot), false, "a reaction to the bot");
 });
 
 test("addressed by name only at the start of a message", () => {
@@ -106,4 +107,16 @@ test("DEFAULT_LANGUAGE applies to newly enabled groups; existing groups keep the
   } finally {
     setDefaultLanguage("zh-tw");
   }
+});
+
+import { isJustReaction } from "../src/telegram/groups.ts";
+
+test("a sticker, emoji or a short reaction word is a reaction; anything with a real question isn't", () => {
+  const m = (text: string | undefined, extra: Record<string, unknown> = {}) => ({ message_id: 1, date: 0, text, ...extra }) as never;
+  const reactions = ["哈哈哈", "哈哈哈哈。", "6", "666", "笑死", "谢谢！", "👍", "😂😂", "ok", "Thanks", "收到", "?", "hahaha", "牛逼", "草"];
+  const questions = ["哈哈那北京呢", "为什么", "6点呢", "谢谢，那上海呢？", "ok but why", "再来一张", "不对吧", "多少钱", "真的吗？为什么"];
+  assert.deepEqual(reactions.filter((t) => !isJustReaction(m(t))), []);
+  assert.deepEqual(questions.filter((t) => isJustReaction(m(t))), []);
+  assert.equal(isJustReaction(m(undefined, { sticker: { emoji: "😂" } })), true);
+  assert.equal(isJustReaction(m(undefined, { caption: "哈哈", photo: [{}] })), false, "a photo is content");
 });

@@ -107,14 +107,14 @@ export class ReplyStreamer {
     return ids;
   }
 
-  /** End with a plain error notice instead of a reply. */
-  async fail(notice: string): Promise<void> {
+  /** End with a plain error notice instead of a reply. Returns the ids of the messages used. */
+  async fail(notice: string): Promise<number[]> {
     this.#finished = true;
     clearTimeout(this.#timer);
     await this.#flushing;
     const partial = this.#latest.trim();
     const text = partial ? `${partial}\n\n⚠️ ${notice}` : `⚠️ ${notice}`;
-    await this.finish(text);
+    return this.finish(text);
   }
 
   async #flushPreview(): Promise<void> {

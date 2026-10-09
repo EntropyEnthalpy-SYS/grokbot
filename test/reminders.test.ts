@@ -172,3 +172,21 @@ test("each chat's time zone: a New York chat's daily 08:00 stays 08:00 across DS
   assert.equal(store.get(-7, ny)!.dueAt, Date.UTC(2026, 10, 2, 13, 0), "08:00 EST is 13:00 UTC");
   assert.equal(store.get(-8, tp)!.dueAt, Date.UTC(2026, 10, 2, 12, 0), "Taipei has no DST: still 12:00 UTC");
 });
+
+test("when Telegram refuses for good (bot removed from the group), there are no retries: one-offs go, repeating ones pause with the reason", async () => {
+  const store = storeWith({ text: "once" }, { text: "daily", repeat: "daily" });
+  let attempts = 0;
+  const kicked = { sendMessage: async () => { attempts++; throw new Error("Call to 'sendMessage' failed! (403: Forbidden: bot was kicked from the supergroup chat)"); } };
+  await deliverDueReminders(store, kicked, () => true, (r) => r.text, NOW);
+  await deliverDueReminders(store, kicked, () => true, (r) => r.text, NOW + 61_000);
+  assert.equal(attempts, 2, "each tried once, never again");
+  const [daily] = store.list(-1);
+  assert.deepEqual([store.list(-1).length, daily?.text, daily?.paused], [1, "daily", true]);
+  assert.match(daily!.lastError!, /bot was kicked/);
+  assert.deepEqual(store.due(NOW + 3 * DAY), [], "paused: not delivered");
+
+  // A temporary failure still retries.
+  const flaky = storeWith({ text: "x" });
+  await deliverDueReminders(flaky, { sendMessage: async () => { throw new Error("Network request for 'sendMessage' failed!"); } }, () => true, (r) => r.text, NOW);
+  assert.equal(flaky.due(NOW + 60_000).length, 1);
+});

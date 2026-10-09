@@ -171,6 +171,13 @@ export class ReminderStore {
    */
   failed(reminder: Reminder, error: string, now = Date.now()): void {
     const message = error.slice(0, 200);
+    if (isPermanentSendError(error)) {
+      // Removed from the group, chat deleted, no right to post: retrying can't help. A one-off reminder
+      // goes; a repeating one is paused (kept, with the reason in /reminders) so it can be resumed.
+      if (reminder.repeat === "none") return this.remove(reminder.id);
+      this.#db.prepare("UPDATE reminders SET paused = 1, retry_at = NULL, attempts = 0, last_error = ? WHERE id = ?").run(message, reminder.id);
+      return;
+    }
     if (now - reminder.dueAt <= GIVE_UP_AFTER_MS) {
       this.#db.prepare("UPDATE reminders SET retry_at = ?, attempts = attempts + 1, last_error = ? WHERE id = ?").run(now + RETRY_AFTER_MS, message, reminder.id);
     } else if (reminder.repeat === "none") {
@@ -189,6 +196,11 @@ export class ReminderStore {
   forgetChat(chatId: number): number {
     return Number(this.#db.prepare("DELETE FROM reminders WHERE chat_id = ?").run(chatId).changes);
   }
+}
+
+/** Telegram refused for good: the bot was removed, the chat is gone, or it may not post there. */
+export function isPermanentSendError(message: string): boolean {
+  return /\b403\b|bot was kicked|bot is not a member|chat not found|have no rights to send|not enough rights to send|CHAT_WRITE_FORBIDDEN|user is deactivated|bot was blocked/i.test(message);
 }
 
 /**

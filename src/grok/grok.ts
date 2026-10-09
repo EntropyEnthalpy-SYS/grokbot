@@ -91,6 +91,12 @@ export interface ProbeResult {
 export const NO_SEARCH_NOTE =
   "\n\nYou have no live web search right now. For current information (news, weather, prices, schedules, recent events), say plainly that you can't look it up at the moment instead of guessing.";
 
+/**
+ * Retries of a chat request that failed before any answer arrived: a dropped connection,
+ * 408/429 or 5xx (pi-ai's retry, off by default). Retrying is safe: nothing was answered yet.
+ */
+export const REQUEST_RETRIES = 2;
+
 const IMAGE_MODEL = "grok-imagine-image-2.0";
 const STT_URL = "https://api.x.ai/v1/stt";
 const TTS_URL = "https://api.x.ai/v1/tts";
@@ -205,7 +211,8 @@ export class Grok {
     this.stats.set(provider, entry);
   }
 
-  #stream(target: Target, context: Parameters<StreamFn>[1], options: Parameters<StreamFn>[2]): AssistantMessageEventStream {
+  #stream(target: Target, context: Parameters<StreamFn>[1], streamOptions: Parameters<StreamFn>[2]): AssistantMessageEventStream {
+    const options = { ...streamOptions, maxRetries: streamOptions?.maxRetries ?? REQUEST_RETRIES };
     const stream =
       target.provider === "xai"
         ? withoutServerSideToolCalls(
@@ -383,7 +390,7 @@ export class Grok {
     for (const [index, target] of targets.entries()) {
       const { provider, model } = target;
       let requestContext = context;
-      let requestOptions: SimpleStreamOptions = { signal: options.signal, reasoning: "low" };
+      let requestOptions: SimpleStreamOptions = { signal: options.signal, reasoning: "low", maxRetries: REQUEST_RETRIES };
       if (provider === "xai") {
         // Grok searches the web and X itself (hosted tools).
         requestOptions = this.#requestOptions(model, requestOptions, this.route, options.search ?? false);

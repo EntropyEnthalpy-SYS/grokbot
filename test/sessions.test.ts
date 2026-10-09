@@ -346,3 +346,73 @@ test("an empty reply is retried once; a turn whose tools did the work (a poll) i
   assert.equal(requests, 2, "the poll call and its (empty) wrap-up, no extra request that could post a second poll");
   assert.deepEqual(polled.content, []);
 });
+
+import { claimsImageSent, NO_IMAGE_SENT } from "../src/agent/sessions.ts";
+
+test("a reply claiming a picture was sent is recognized; offers, refusals and talk about others' pictures are not", () => {
+  const claims = ["再发一张。", "发你一张", "给你发了几张图", "照片如下：", "图来了～", "再傳一張！", "Here's the photo.", "Sending another picture.", "I've attached the image."];
+  const others = ["要我画一张吗？", "发不了照片，给你个搜索链接。", "我没法发真人照片。", "这个可以上。", "就是上一张那个。", "你发的那张图挺好笑", "Here's the link: https://x.com", "I can't send photos."];
+  assert.deepEqual(claims.filter((t) => !claimsImageSent(t)), [], "missed claims");
+  assert.deepEqual(others.filter((t) => claimsImageSent(t)), [], "not claims");
+});
+
+test("“再发一张。” without a picture is corrected once; with create_image it is left alone", { timeout: 5000 }, async () => {
+  const db = openDbAt(":memory:");
+  let script: { text: string; tool?: boolean }[] = [];
+  const requests: string[] = [];
+  const imageTool = { name: "create_image", label: "image", description: "", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [{ type: "text", text: "Image created." }], details: undefined }) };
+  const grok = {
+    model: () => model,
+    streamFn: (_model: unknown, context: { messages: { role: string; content: unknown }[] }) => {
+      requests.push(JSON.stringify(context.messages.at(-1)!.content));
+      const step = script[requests.length - 1] ?? { text: "unexpected extra request" };
+      const stream = createAssistantMessageEventStream();
+      const content = step.tool ? [{ type: "toolCall", id: "fc_1", name: "create_image", arguments: {} }] : [{ type: "text", text: step.text }];
+      const message = { role: "assistant", content, api: model.api, provider: model.provider, model: model.id, usage: zero, stopReason: step.tool ? "toolUse" : "stop", timestamp: Date.now() } as unknown as AssistantMessage;
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: { ...message, content: [] } });
+        stream.push({ type: "done", reason: message.stopReason as "stop", message });
+      });
+      return stream;
+    },
+  };
+  const sessions = new ChatSessions({ db, grok: grok as never, systemPrompt: () => "", tools: () => [imageTool as never] });
+
+  script = [{ text: "再发一张。" }, { text: "真人照片我发不了，可以搜：https://www.google.com/search?q=鞠婧祎" }];
+  const corrected = await sessions.run("tg:-1", { text: "来个鞠婧祎照片" });
+  assert.match((corrected.content[0] as { text: string }).text, /发不了/);
+  assert.equal(requests.length, 2);
+  assert.ok(requests[1]!.includes(NO_IMAGE_SENT.slice(0, 40)));
+  const stored = (db.prepare("SELECT messages FROM chats WHERE chat_key = 'tg:-1'").get() as { messages: string }).messages;
+  assert.doesNotMatch(stored, /再发一张|automatic note/, "the false claim and the note are not kept");
+
+  // The same for a note that was never saved.
+  script = [{ text: "好的，记住了。" }, { text: "还没保存，用 /lm add 小明吃素 就能存。" }];
+  requests.length = 0;
+  const note = await sessions.run("tg:-3", { text: "记住小明吃素" });
+  assert.match((note.content[0] as { text: string }).text, /还没保存/);
+  assert.ok(requests[1]!.includes("saved a note, but nothing was saved"));
+
+  script = [{ text: "", tool: true }, { text: "再发一张。" }];
+  requests.length = 0;
+  await sessions.run("tg:-2", { text: "画一只猫" });
+  assert.equal(requests.length, 2, "the image call and its wrap-up only: a real picture was made");
+});
+
+import { falseClaim } from "../src/agent/sessions.ts";
+
+test("claims of actions that didn't happen (note, poll, reminder, picture) are caught; denials, questions and talk are not", () => {
+  const none = new Set<string>();
+  const claims: [string, string][] = [
+    ["再发一张。", "image"], ["好的，记住了。", "note"], ["已记下：小明吃素", "note"], ["Noted!", "note"],
+    ["投票已发起，大家投吧", "poll"], ["帮你开了一个投票", "poll"], ["好，明天9点会提醒你们。", "reminder"], ["到时叫你", "reminder"], ["I'll remind you at 9.", "reminder"],
+  ];
+  assert.deepEqual(claims.filter(([t, action]) => falseClaim(t, none)?.action !== action), [], "missed or misread claims");
+  const fine = [
+    "我没法设提醒，用 /remind 吧。", "我不会记住这个。", "你记住了吗？", "上次的投票结果是拉面赢了。", "要我开个投票吗？",
+    "提醒一下，明天放假。", "记得带伞。", "这个设定挺合理。", "Not noted, sorry.", "我记得你说过这个。", "你发起的投票我看到了。",
+  ];
+  assert.deepEqual(fine.filter((t) => falseClaim(t, none)), [], "not claims");
+  assert.equal(falseClaim("好的，记住了。", new Set(["remember"])), undefined, "the tool ran: true");
+  assert.equal(falseClaim("投票已发起", new Set(["create_poll"])), undefined);
+});

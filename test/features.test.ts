@@ -169,7 +169,7 @@ test("backup copies everything except logins and API keys", () => {
   const path = backupWithoutSecrets(db, dir);
   const copy = new DatabaseSync(path);
   assert.equal((copy.prepare("SELECT COUNT(*) AS n FROM credentials").get() as { n: number }).n, 0);
-  assert.deepEqual(copy.prepare("SELECT key FROM settings").all().map((r) => (r as { key: string }).key), ["model"]);
+  assert.deepEqual(copy.prepare("SELECT key FROM settings ORDER BY key").all().map((r) => (r as { key: string }).key), ["answers_tracked_since", "model"], "device_id is a secret; the rest is kept");
   assert.equal((copy.prepare("SELECT text FROM group_memory").get() as { text: string }).text, "小明吃素");
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM credentials").get() as { n: number }).n, 1, "the live database keeps its logins");
 });

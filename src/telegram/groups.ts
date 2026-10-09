@@ -233,17 +233,21 @@ export class GroupStore {
   }
 
   /**
-   * Remember which of the bot's messages were posted automatically (link cards, video cards,
-   * voice transcripts): a reply to one is a comment about it, not a question to the bot.
+   * Remember the bot's answers in a group (chat replies, images, translations): a reply to one
+   * continues the conversation. A reply to anything else the bot posts (link cards, transcripts,
+   * reminders, previews, notices) is people talking, so it needs "grok," or a mention.
    * Only message ids are kept (for a week), so this also works in strict groups.
    */
-  markAuto(chatId: number, messageIds: readonly number[], now = Date.now()): void {
-    const insert = this.#db.prepare("INSERT OR IGNORE INTO auto_posts (chat_id, message_id, at) VALUES (?, ?, ?)");
+  markAnswer(chatId: number, messageIds: readonly number[], now = Date.now()): void {
+    const insert = this.#db.prepare("INSERT OR IGNORE INTO bot_answers (chat_id, message_id, at) VALUES (?, ?, ?)");
     for (const id of messageIds) insert.run(chatId, id, now);
   }
 
-  isAuto(chatId: number, messageId: number): boolean {
-    return this.#db.prepare("SELECT 1 FROM auto_posts WHERE chat_id = ? AND message_id = ?").get(chatId, messageId) !== undefined;
+  /** Whether a bot message is one of its answers. `sentAt` (ms): older messages, sent before answers were recorded, count as answers. */
+  isAnswer(chatId: number, messageId: number, sentAt: number): boolean {
+    const since = Number((this.#db.prepare("SELECT value FROM settings WHERE key = 'answers_tracked_since'").get() as { value: string } | undefined)?.value ?? 0);
+    if (sentAt < since) return true;
+    return this.#db.prepare("SELECT 1 FROM bot_answers WHERE chat_id = ? AND message_id = ?").get(chatId, messageId) !== undefined;
   }
 
   /** Whether voice notes are transcribed automatically in this group. */
@@ -306,7 +310,7 @@ export class GroupStore {
 
   prune(now = Date.now()): void {
     this.#db.prepare("DELETE FROM group_log WHERE at < ?").run(now - LOG_RETENTION_MS);
-    this.#db.prepare("DELETE FROM auto_posts WHERE at < ?").run(now - LOG_RETENTION_MS);
+    this.#db.prepare("DELETE FROM bot_answers WHERE at < ?").run(now - LOG_RETENTION_MS);
   }
 }
 
@@ -345,6 +349,19 @@ export function linksIn(message: TgMessage): string[] {
   return extractLinks(message.text ?? message.caption, message.entities ?? message.caption_entities);
 }
 
+/** Short reactions people reply with: laughter, thanks, agreement. */
+const REACTION_WORDS =
+  /^(哈+|呵+|嘿+|h+a+h*[ah]*|lol+|lmao|xd+|笑死|笑死了|笑哭|绝了|絕了|6+|好的?|好吧|ok|okay|k|嗯+|哦+|噢+|收到|了解|明白|懂了|谢谢|謝謝|感谢|感謝|多谢|多謝|thanks|thank you|thx|ty|牛|牛逼|nb|nice|赞|讚|厉害|厲害|可以|行|对|對|是的|yes|yep|真的假的|离谱|離譜|草|？+|\?+|!+|！+)$/i;
+
+/** A message that is only a sticker, emoji, or a short reaction word ("哈哈哈", "6", "谢谢", "👍"). */
+export function isJustReaction(message: TgMessage): boolean {
+  if (message.sticker) return true;
+  const text = (message.text ?? "").trim();
+  if (!text || message.photo || message.video || message.voice || message.document) return false;
+  const words = text.replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\u200d\ufe0f\s。，,.~～…！!？?]+/gu, "");
+  return words === "" || REACTION_WORDS.test(words);
+}
+
 /** Bot is called by name at the start of a message: "grok, …", "hey grok …". */
 /**
  * "grok, …", "grok: …", "grok？", "grok 這是…" (CJK right after), or "hey/hi grok …".
@@ -354,12 +371,13 @@ const NAME_TRIGGER = /^\s*(?:(?:hey|hi)\s+grok\b[\s,:，：!！?？]*|grok(?:\s*
 
 /**
  * Whether a group message is addressed to the bot: an @mention, starting with its name, or a
- * reply to one of its messages. A reply to something it posted automatically (`isAuto`: link
- * cards, transcripts) is people talking about that content, so it counts only with the name or a mention.
+ * reply to one of its answers (`isAnswer`). A reply to anything else it posted (cards,
+ * transcripts, reminders, notices) is people talking, so it counts only with the name or a mention.
  */
-export function isAddressedToBot(message: TgMessage, bot: Bot, isAuto: (messageId: number) => boolean = () => false): boolean {
+export function isAddressedToBot(message: TgMessage, bot: Bot, isAnswer: (messageId: number, sentAt: number) => boolean = () => true): boolean {
   const replied = message.reply_to_message;
-  if (replied?.from?.id === bot.id && !isAuto(replied.message_id)) return true;
+  // "哈哈", "6", "谢谢", a sticker: a reaction to the answer, not a new question.
+  if (replied?.from?.id === bot.id && isAnswer(replied.message_id, replied.date * 1000) && !isJustReaction(message)) return true;
   const text = message.text ?? message.caption ?? "";
   const entities = (message.entities ?? message.caption_entities ?? []) as (Entity & { user?: TgUser })[];
   for (const entity of entities) {

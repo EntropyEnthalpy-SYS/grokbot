@@ -133,8 +133,11 @@ export function openDbAt(path: string): Db {
   addColumnIfMissing(db, "reminders", "last_error", "TEXT");
   // 🔞 Skip link cards for adult sites.
   addColumnIfMissing(db, "groups", "hide_adult", "INTEGER NOT NULL DEFAULT 1");
-  // Message ids of the bot's automatic posts (cards, transcripts): replies to them aren't questions. Ids only.
-  db.exec("CREATE TABLE IF NOT EXISTS auto_posts (chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (chat_id, message_id))");
+  // Message ids of the bot's answers in groups: a reply to one continues the conversation. Ids only.
+  db.exec("CREATE TABLE IF NOT EXISTS bot_answers (chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (chat_id, message_id))");
+  db.exec("DROP TABLE IF EXISTS auto_posts");
+  // Replies to bot messages sent before answers were recorded keep counting as questions.
+  db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('answers_tracked_since', ?)").run(String(Date.now()));
   migrateTrusted(db);
   return db;
 }

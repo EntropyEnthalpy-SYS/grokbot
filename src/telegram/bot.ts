@@ -106,6 +106,8 @@ const KEEP_COMMANDS = new Set(["tr", "img", "remind", "enable", "start"]);
 /** Default question limits (the owner changes them in /admin → ⚖️ Limits). */
 export const QUESTIONS_PER_USER_PER_HOUR = LIMITS.questionsPerUserHour.default;
 export const QUESTIONS_PER_GROUP_PER_HOUR = LIMITS.questionsPerGroupHour.default;
+/** A link reposted within this time after its card gets no second card. */
+const REPOST_WINDOW_MS = 6 * HOUR;
 /** Group answers Grok works on at once; more wait their turn. */
 const CONCURRENT_ANSWERS = 3;
 /** Automatic downloads and cards (videos, posts, voice) running at once across all groups. */
@@ -808,6 +810,7 @@ export function createBot({
       }
       // Reply to the translated message itself, so it's clear what the translation belongs to.
       const ids = await new ReplyStreamer(bot.api, chatId, { replyTo: source?.message_id ?? message.message_id, threadId }).finish(`🌐 ${translation}`);
+      answered(chatId, ids);
       if (isGroup(ctx)) logBotMessage(ctx, chatId, threadId, ids[0], `[translation]\n${translation}`);
     });
   }
@@ -833,7 +836,7 @@ export function createBot({
       try {
         const photo = source ? await media.photo(source) : undefined;
         const image = await images.create(sessionKey(chatId, threadId), prompt, { sources: photo ? [photo] : undefined });
-        await postImages(chatId, [image], message.message_id, threadId);
+        answered(chatId, await postImages(chatId, [image], message.message_id, threadId));
         usage.record(chatId, who(ctx), "image");
       } finally {
         clearInterval(timer);
@@ -841,21 +844,19 @@ export function createBot({
     });
   }
 
-  async function postImages(chatId: number, created: Buffer[], replyTo: number | undefined, threadId: number | undefined): Promise<void> {
-    if (created.length === 0) return;
+  async function postImages(chatId: number, created: Buffer[], replyTo: number | undefined, threadId: number | undefined): Promise<number[]> {
+    if (created.length === 0) return [];
     const other = {
       ...(replyTo ? { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } } : {}),
       ...(threadId ? { message_thread_id: threadId } : {}),
     };
-    if (created.length === 1) {
-      await bot.api.sendPhoto(chatId, new InputFile(created[0]!, "image.jpg"), other);
-      return;
-    }
-    await bot.api.sendMediaGroup(
+    if (created.length === 1) return [(await bot.api.sendPhoto(chatId, new InputFile(created[0]!, "image.jpg"), other)).message_id];
+    const sent = await bot.api.sendMediaGroup(
       chatId,
       created.map((image, i) => ({ type: "photo" as const, media: new InputFile(image, `image${i + 1}.jpg`) })),
       other,
     );
+    return sent.map((message) => message.message_id);
   }
 
   bot.command("remind", (ctx) => {
@@ -1066,7 +1067,7 @@ export function createBot({
     const chatId = ctx.chat!.id;
     const threadId = threadIdOf(message);
     const normal = groups.privacy(chatId) === "normal";
-    if (isAddressedToBot(message, me, (id) => groups.isAuto(chatId, id))) {
+    if (isAddressedToBot(message, me, (id, sentAt) => groups.isAnswer(chatId, id, sentAt))) {
       if (!mayAsk(ctx, chatId)) return refuseOverLimit(ctx, message, threadId);
       void ctx.react("👀").catch(() => undefined);
       background(ctx, () => answers.use(() => answerInGroup(ctx, message, threadId)));
@@ -1086,10 +1087,18 @@ export function createBot({
     }
     // Telegram channel/group links (forwarded posts' footers) aren't content; adult sites are skipped unless the owner allows them.
     const hideAdult = groups.hideAdult(chatId);
-    const found = linksIn(message).filter((url) => !isTelegramLink(url) && !(hideAdult && isAdultUrl(url)));
+    const found = linksIn(message).filter((url) => !isTelegramLink(url) && !(hideAdult && isAdultUrl(url)) && !recentlyCarded(chatId, url));
     if (found.length > 0 && auto && autoCards.take(String(chatId))) {
+      for (const url of found) cardedAt.set(`${chatId} ${url}`, Date.now());
       background(ctx, () => autoJobs.use(() => showLinkContent(ctx, message, found, threadId)), { quiet: true });
     }
+  }
+
+  /** Links that got a card, per chat: a repost within REPOST_WINDOW_MS gets no second card. */
+  const cardedAt = new Map<string, number>();
+  function recentlyCarded(chatId: number, url: string, now = Date.now()): boolean {
+    for (const [key, at] of cardedAt) if (now - at > REPOST_WINDOW_MS) cardedAt.delete(key);
+    return cardedAt.has(`${chatId} ${url}`);
   }
 
   /**
@@ -1446,9 +1455,12 @@ export function createBot({
         { ephemeral: target.ephemeral },
       );
       if (reply.stopReason === "error") {
-        await streamer.fail(friendlyError(reply.errorMessage ?? "unknown error", grok.route, isOwner(ctx)));
+        // Logged (no message content) so a failed answer leaves a trace in the journal and /health.
+        console.warn(`answer failed in chat ${chatId}: ${reply.errorMessage ?? "unknown error"}`);
+        health?.recordError(new Error(`answer failed: ${reply.errorMessage ?? "unknown error"}`));
+        ids = await streamer.fail(friendlyError(reply.errorMessage ?? "unknown error", grok.route, isOwner(ctx)));
       } else if (reply.stopReason === "aborted") {
-        await streamer.fail("Stopped.");
+        ids = await streamer.fail("Stopped.");
       } else {
         finalText = assistantText(reply).trim();
         if (!finalText) {
@@ -1462,12 +1474,17 @@ export function createBot({
       }
     } catch (error) {
       // Queued behind another answer when /new or /forget cleared the chat: same as being stopped.
-      await streamer.fail(error instanceof TurnCancelledError ? "Stopped." : friendlyError(errorMessage(error), grok.route, isOwner(ctx)));
+      if (!(error instanceof TurnCancelledError)) {
+        console.warn(`answer failed in chat ${chatId}: ${errorMessage(error)}`);
+        health?.recordError(error);
+      }
+      ids = await streamer.fail(error instanceof TurnCancelledError ? "Stopped." : friendlyError(errorMessage(error), grok.route, isOwner(ctx)));
     } finally {
       typing.stop();
       if (speakers.get(target.key) === speaker) speakers.delete(target.key);
       const created = imageTurn ? images.end(imageTurn) : [];
-      await postImages(ctx.chat!.id, created, target.replyTo, target.threadId).catch(async (error) => {
+      answered(chatId, ids);
+      await postImages(ctx.chat!.id, created, target.replyTo, target.threadId).then((imageIds) => answered(chatId, imageIds), async (error) => {
         await ctx.reply(`⚠️ Couldn't post the image: ${errorMessage(error)}`).catch(() => undefined);
       });
       if (created.length) usage.record(chatId, who(ctx), "image", created.length);
@@ -1483,10 +1500,11 @@ export function createBot({
     const text = speakableText(markdown);
     if (!text || !(await grok.signedIn("xai"))) return;
     const voice = await toVoiceNote(await grok.speak(text));
-    await bot.api.sendVoice(ctx.chat!.id, new VoiceFile(voice, "reply.ogg"), {
+    const sent = await bot.api.sendVoice(ctx.chat!.id, new VoiceFile(voice, "reply.ogg"), {
       ...(target.replyTo ? { reply_parameters: { message_id: target.replyTo, allow_sending_without_reply: true } } : {}),
       ...(target.threadId ? { message_thread_id: target.threadId } : {}),
     });
+    answered(ctx.chat!.id, [sent.message_id]);
     usage.record(ctx.chat!.id, who(ctx), "tts", text.length);
   }
 
@@ -1495,10 +1513,14 @@ export function createBot({
     sessions.abort(sessionKey(ctx.update.stopped_message_generation!.chat.id, 0));
   });
 
-  /** A card or transcript the bot posted by itself: remembered as automatic (replies to it aren't questions), and logged. */
+  /** A card or transcript the bot posted by itself (not an answer: replies to it aren't questions). */
   function autoPost(ctx: Context, chatId: number, threadId: number, ids: readonly number[], text: string): void {
-    groups.markAuto(chatId, ids);
     for (const id of ids) logBotMessage(ctx, chatId, threadId, id, text);
+  }
+
+  /** The bot's answers in a group: replies to them continue the conversation. */
+  function answered(chatId: number, ids: readonly (number | undefined)[]): void {
+    if (chatId < 0) groups.markAnswer(chatId, ids.filter((id): id is number => id !== undefined));
   }
 
   function logBotMessage(ctx: Context, chatId: number, threadId: number, messageId: number | undefined, text: string): void {
@@ -1628,6 +1650,11 @@ export function friendlyError(message: string, route: Route, forOwner = true): s
   }
   if (/\b402\b|\b429\b|quota|rate limit|run out/i.test(message)) {
     return forOwner ? "Grok usage limit reached. Check /status and try again later." : "The AI usage limit is reached for now. Please try again later.";
+  }
+  if (/connection error|ECONNRESET|ETIMEDOUT|fetch failed|socket hang up|network/i.test(message)) {
+    return forOwner
+      ? `Couldn't reach the AI service (${message}), even after retrying. Usually a short network hiccup: ask again. A second provider in /admin → 🤖 AI providers answers when Grok can't.`
+      : "Couldn't reach the AI service just now. Please ask again in a moment.";
   }
   return forOwner ? `Grok error: ${message}` : "Something went wrong with the AI service. Please try again in a moment.";
 }

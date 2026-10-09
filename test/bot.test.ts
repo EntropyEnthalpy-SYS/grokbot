@@ -34,6 +34,8 @@ function harness(
     files?: Record<string, string>;
     /** Telegram refuses ephemeral messages (bot is not an admin). */
     refuseEphemeral?: boolean;
+    /** Each message the bot sends gets its own id (default: all are message 1). */
+    distinctIds?: boolean;
     /** The chat agent's turn: may call the create_image tool like Grok would. */
     agent?: (
       images: ImageStudio,
@@ -42,7 +44,7 @@ function harness(
     ) => Promise<string | { text: string; stopReason?: string; usedTool?: boolean }>;
   } = {},
 ) {
-  const calls: { method: string; payload: Record<string, unknown> }[] = [];
+  const calls: { method: string; payload: Record<string, unknown>; sentId?: number }[] = [];
   const db = openDbAt(":memory:");
   const groups = new GroupStore(db);
   const reminders = new ReminderStore(db, (chatId) => groups.timeZone(chatId));
@@ -121,10 +123,13 @@ function harness(
       const id = (payload as { file_id: string }).file_id;
       return { ok: true, result: { file_id: id, file_unique_id: id, file_path: options.files?.[id] } } as never;
     }
-    return { ok: true, result: ["sendMessage", "sendPhoto", "sendVoice"].includes(method) ? { message_id: 1, date: 0, chat: { id: GROUP, type: "supergroup" } } : true } as never;
+    const message_id = options.distinctIds ? ++sentId : 1;
+    calls.at(-1)!.sentId = message_id;
+    return { ok: true, result: ["sendMessage", "sendPhoto", "sendVoice"].includes(method) ? { message_id, date: 0, chat: { id: GROUP, type: "supergroup" } } : true } as never;
   });
   let updateId = 0;
   let messageId = 100;
+  let sentId = 5000;
   const groupText = (from: number, text: string, extra: Record<string, unknown> = {}): Update => ({
     update_id: ++updateId,
     message: {
@@ -825,28 +830,46 @@ test("what members see when a reply has no text, or was cut off at the length li
   assert.match(lastText(), /第一段[\s\S]*cut off at the length limit/);
 });
 
-test("a reply to the bot's automatic post (a voice transcript) is a comment, unless it says grok; replies to its answers are questions", async () => {
+test("only replies to the bot's answers continue a conversation; replies to its other posts are people talking", async () => {
   const voice = join(mkdtempSync(join(tmpdir(), "v-")), "q.ogg");
   writeFileSync(voice, "ogg bytes");
-  const h = harness({ loggedIn: true, files: { v1: voice } });
+  const h = harness({ loggedIn: true, files: { v1: voice }, distinctIds: true });
   h.groups.enable(GROUP, "Grok bot test");
   h.groups.setPrivacy(GROUP, "normal");
+  const now = Math.ceil(Date.now() / 1000) + 1; // Telegram dates are whole seconds; after answers started being recorded
+  const fromBot = (message_id: number, text: string) => ({ message_id, date: now, chat: { id: GROUP, type: "supergroup" }, from: { id: 999, is_bot: true, first_name: "Grokky" }, text });
+  const sentText = (pattern: RegExp) => h.calls.find((c) => c.method === "sendMessage" && pattern.test(String(c.payload.text)));
+
+  // An answer: the bot's reply to a question.
+  await h.bot.handleUpdate(h.groupText(6, "grok, 几点了"));
+  await h.until((c) => c.method === "sendMessage" && c.payload.text === "ok");
+  const answerId = h.calls.find((c) => c.method === "sendMessage" && c.payload.text === "ok")!.sentId!;
+  // A voice transcript (automatic) and a reminder-style notice (any other bot message).
   await h.bot.handleUpdate(h.groupText(5, "", { text: undefined, voice: { file_id: "v1", file_unique_id: "v1", duration: 3 } }));
   await h.until((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("🎙️"));
-  const transcript = { message_id: 1, date: 0, chat: { id: GROUP, type: "supergroup" }, from: { id: 999, is_bot: true, first_name: "Grokky" }, text: "🎙️ 現在幾點？" };
-  assert.equal(h.groups.isAuto(GROUP, 1), true, "the transcript is remembered as automatic");
+  assert.ok(sentText(/^🎙️/));
+  const runs = h.runs.length;
 
-  await h.bot.handleUpdate(h.groupText(6, "哈哈 他又在问时间", { reply_to_message: transcript }));
+  const transcriptId = sentText(/^🎙️/)!.sentId!;
+  await h.bot.handleUpdate(h.groupText(6, "哈哈 他又在问时间", { reply_to_message: fromBot(transcriptId, "🎙️ 現在幾點？") }));
+  await h.bot.handleUpdate(h.groupText(6, "收到", { reply_to_message: fromBot(9999, "⏰ 开会") }));
   await h.settle();
-  assert.equal(h.runs.length, 0, "talking about the transcript doesn't summon the bot");
-  await h.bot.handleUpdate(h.groupText(6, "grok, 他说的对吗", { reply_to_message: transcript }));
-  await h.settle();
-  assert.equal(h.runs.length, 1);
+  assert.equal(h.runs.length, runs, "transcripts and reminders don't summon the bot");
 
-  const answer = { ...transcript, message_id: 50, text: "现在是下午三点。" };
-  await h.bot.handleUpdate(h.groupText(6, "那北京呢", { reply_to_message: answer }));
+  await h.bot.handleUpdate(h.groupText(6, "grok, 他说的对吗", { reply_to_message: fromBot(transcriptId, "🎙️ 現在幾點？") }));
   await h.settle();
-  assert.equal(h.runs.length, 2, "a reply to an answer continues the conversation");
+  assert.equal(h.runs.length, runs + 1, "with grok, it does");
+  await h.bot.handleUpdate(h.groupText(6, "哈哈哈", { reply_to_message: fromBot(answerId, "ok") }));
+  await h.bot.handleUpdate(h.groupText(6, "", { text: undefined, sticker: { file_id: "s", file_unique_id: "s", type: "regular", width: 1, height: 1, is_animated: false, is_video: false, emoji: "😂" }, reply_to_message: fromBot(answerId, "ok") }));
+  await h.settle();
+  assert.equal(h.runs.length, runs + 1, "laughing at an answer isn't a question");
+  await h.bot.handleUpdate(h.groupText(6, "那北京呢", { reply_to_message: fromBot(answerId, "ok") }));
+  await h.settle();
+  assert.equal(h.runs.length, runs + 2, "a reply to an answer continues the conversation");
+  const old = { ...fromBot(42, "an answer from before the update"), date: 0 };
+  await h.bot.handleUpdate(h.groupText(6, "继续", { reply_to_message: old }));
+  await h.settle();
+  assert.equal(h.runs.length, runs + 3, "bot messages from before answers were recorded still count");
 });
 
 test("no cards for t.me links or adult sites (unless the owner shows them); /platforms off upload stops video cards", async () => {
@@ -861,6 +884,9 @@ test("no cards for t.me links or adult sites (unless the owner shows them); /pla
   await h.bot.handleUpdate(linkMessage("https://example.com/article"));
   await h.settle();
   assert.equal(startedCards(), 1, "an ordinary link still gets a card");
+  await h.bot.handleUpdate(linkMessage("https://example.com/article"));
+  await h.settle();
+  assert.equal(startedCards(), 1, "the same link reposted soon after gets no second card");
   h.groups.setHideAdult(GROUP, false);
   await h.bot.handleUpdate(linkMessage("https://pornhub.com"));
   await h.settle();
