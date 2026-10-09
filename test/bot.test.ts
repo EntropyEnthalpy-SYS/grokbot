@@ -39,7 +39,7 @@ function harness(
       images: ImageStudio,
       key: string,
       extra: { memory: MemoryStore; speakers: Map<string, { userId?: number; userName: string }>; polls: PollDesk; confirm: Confirmer },
-    ) => Promise<string>;
+    ) => Promise<string | { text: string; stopReason?: string; usedTool?: boolean }>;
   } = {},
 ) {
   const calls: { method: string; payload: Record<string, unknown> }[] = [];
@@ -68,8 +68,10 @@ function harness(
       runs.push({ key, ephemeral: turn.ephemeral, text: input.text, images: input.images?.length ?? 0 });
       handlers.onStart?.();
       const confirm = confirmerFor({ actions, confirmActions: (chatId) => groups.confirmActions(chatId), speakers }, key);
-      const text = options.agent ? await options.agent(images, key, { memory, speakers, polls, confirm }) : "ok";
-      return { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
+      const out = options.agent ? await options.agent(images, key, { memory, speakers, polls, confirm }) : "ok";
+      const { text, stopReason = "stop", usedTool = false } = typeof out === "string" ? { text: out } : out;
+      if (usedTool) (handlers as { onTool?: (name: string) => void }).onTool?.("create_poll");
+      return { role: "assistant", content: text ? [{ type: "text", text }] : [], stopReason };
     },
   };
   const asked: { system: string; prompt: string; images: number }[] = [];
@@ -790,4 +792,27 @@ test("a suggested poll can be discarded; with confirmations off it is posted at 
   await h.bot.handleUpdate(h.groupText(7, "grok, 再開一個"));
   await h.settle();
   assert.equal(h.calls.filter((c) => c.method === "sendPoll").length, 1);
+});
+
+test("what members see when a reply has no text, or was cut off at the length limit", async () => {
+  const replies: { text: string; stopReason?: string; usedTool?: boolean }[] = [
+    { text: "", usedTool: true },
+    { text: "" },
+    { text: "第一段……", stopReason: "length" },
+  ];
+  const h = harness({ loggedIn: true, agent: async () => replies.shift()! });
+  h.groups.enable(GROUP, "Grok bot test");
+  const lastText = () => {
+    const call = h.calls.filter((c) => ["sendMessage", "editMessageText"].includes(c.method)).at(-1)!;
+    return String(call.payload.text);
+  };
+  await h.bot.handleUpdate(h.groupText(7, "grok, 開個投票"));
+  await h.settle();
+  assert.equal(lastText(), "✅", "a poll was the answer");
+  await h.bot.handleUpdate(h.groupText(7, "grok, ?"));
+  await h.settle();
+  assert.match(lastText(), /couldn't come up with an answer/);
+  await h.bot.handleUpdate(h.groupText(7, "grok, 寫長文"));
+  await h.settle();
+  assert.match(lastText(), /第一段[\s\S]*cut off at the length limit/);
 });

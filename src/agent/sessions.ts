@@ -169,19 +169,26 @@ export class ChatSessions {
     agent.state.messages = dropOldImages(dropExpired(agent.state.messages, Date.now() - this.#retentionMs));
 
     let text = "";
+    let toolsRan = false;
     const unsubscribe = agent.subscribe((event: AgentEvent) => {
       if (event.type === "message_start" && event.message.role === "assistant") text = "";
       if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
         text += event.assistantMessageEvent.delta;
         handlers.onText?.(text);
       }
-      if (event.type === "tool_execution_start") handlers.onTool?.(event.toolName);
+      if (event.type === "tool_execution_start") {
+        toolsRan = true;
+        handlers.onTool?.(event.toolName);
+      }
     });
     try {
       await agent.prompt(input.text, input.images);
-      // "我查一下。" and nothing else: the bot can't send a second message later, so make it do the work now (once).
+      // "我查一下。" and nothing else, or no text at all: the bot can't send a second message later,
+      // so the model is asked once to do the work now.
+      // A turn whose tools did the work (a poll posted, an image made) may end without text: that's an answer.
       const first = lastAssistant(agent.state.messages);
-      if (first?.stopReason === "stop" && isBarePromise(assistantText(first))) {
+      const firstText = first ? assistantText(first).trim() : "";
+      if (first?.stopReason === "stop" && ((!firstText && !toolsRan) || isBarePromise(firstText))) {
         await agent.prompt(FINISH_NOW);
         // Keep the conversation as question → answer: the promise and the note go, the question's photos stay the latest.
         const promiseAt = agent.state.messages.indexOf(first);
@@ -332,18 +339,39 @@ export function cleanHistory(messages: readonly AgentMessage[]): AgentMessage[] 
 
 /** Sent when a reply only promised to look something up. */
 export const FINISH_NOW =
-  "(automatic note) You said you would check, but you can't send another message later. Do it now with your tools (search, read_link…) and give the result in this reply. If you can't find it, say what you found and what's missing.";
+  "(automatic note) Your last reply didn't answer: it was empty or only said you would check, but you can't send another message later. Do it now with your tools (search, read_link…) and give the result in this reply. If you can't find it, say what you found and what's missing.";
+
+/** A lookup verb ("查", "核对", "調べ", "check"…). */
+const LOOKUP = /查|搜|找|核對|核对|確認|确认|看看|調べ|確認し|探し|検索|\b(check(ing)?|look(ing)? (it |that )?(up|into)|search(ing)?|verify(ing)?|find(ing)? out|dig(ging)? (in|into))\b/i;
+/** Who promises, or "right now": first person, "hold on", or a Japanese polite future. */
+const PROMISE = /我|咱|讓我|让我|等我|稍等|馬上|马上|這就|这就|現在|现在|接下來|接下来|ます|みます|ましょう|\b(let me|i'?ll|i will|i'?m going to|hold on|checking|searching|looking|digging)\b/i;
+/** Not a promise: no need / don't, someone else should look, or the lookup already happened. */
+const NOT_PROMISE = new RegExp(
+  [
+    "不用|不必|不需要|沒必要|没必要|別|别|不要|自己|建議|建议|可以去",
+    "(?<![帮幫替给給])(你|您|妳)(可以|先|再|去|自己)?(查|搜|找|看)",
+    "(查|搜|找|核對|核对|確認|确认)(過|过|到|完|好了|不到|是|為|为)",
+    "\\b(can'?t|cannot|won'?t|no need|already|you can|you could)\\b",
+  ].join("|"),
+  "i",
+);
+/** A reply that is only "one moment" / "稍等". */
+const WAIT_ONLY = /^(請|请)?(稍等|稍候|等等|等一下|馬上|马上)[一下哈呀喔哦啊]*$|^(one (sec|second|moment)|hold on|just a (sec|second|moment))$/i;
 
 /**
- * A short reply that only announces a lookup ("地点在河南，我按这个再查。", "我核对一下。",
- * "Let me check.") instead of answering. Answers that report a result ("查不到。") don't count.
+ * A short reply that only announces a lookup ("地点在河南，我按这个再查。", "收到，我查一下资料。",
+ * "Hold on, checking.") instead of answering. It is judged by its last clause, so a result
+ * ("查不到。", "我查過了，是翊聯。"), advice ("你可以自己查。") or a question ("要我查嗎？") doesn't count.
  */
 export function isBarePromise(text: string): boolean {
   const t = text.trim();
-  if (!t || t.length > 60) return false;
-  const zh = /(我|讓我|让我)?(先|再|去|來|来|按這個|按这个|馬上|马上)*(查|搜|搜尋|搜索|找|核對|核对|確認|确认|看看|查查|查詢|查询)(一下|一查|看看)?[\s。．.！!…~～]*$/;
-  const en = /\b(let me (check|look|search|verify|find)|i'?ll (check|look|search|verify|find)|i will (check|look|search|verify|find)|checking now|one moment|give me a (sec|second|moment))\b[^.!?]*[.!…]*$/i;
-  return zh.test(t) || en.test(t);
+  if (!t || t.length > 60 || /[?？]\s*$/.test(t)) return false;
+  const clauses = t.split(/[，,；;。.!！…~～\n]+/).map((c) => c.trim()).filter(Boolean);
+  if (clauses.length === 0) return false;
+  if (clauses.length === 1 && WAIT_ONLY.test(clauses[0]!)) return true;
+  // "我查一下，稍等。": the promise is the clause before the "wait".
+  const last = clauses.length > 1 && WAIT_ONLY.test(clauses.at(-1)!) ? clauses.at(-2)! : clauses.at(-1)!;
+  return LOOKUP.test(last) && PROMISE.test(last) && !NOT_PROMISE.test(last);
 }
 
 function assistantText(message: AssistantMessage): string {

@@ -1420,6 +1420,7 @@ export function createBot({
     let finalText: string | undefined;
     let ids: number[] = [];
     let imageTurn: ReturnType<ImageStudio["begin"]> | undefined;
+    let toolsUsed = false;
     // This turn's author for the remember tool. The next question in the chat may start before this
     // one's cleanup runs, so cleanup removes only our own entry.
     const speaker = { userId: ctx.from?.id, userName: displayName(ctx.from) };
@@ -1436,6 +1437,9 @@ export function createBot({
             typing.stop();
             streamer.update(text);
           },
+          onTool: () => {
+            toolsUsed = true;
+          },
         },
         { ephemeral: target.ephemeral },
       );
@@ -1444,8 +1448,15 @@ export function createBot({
       } else if (reply.stopReason === "aborted") {
         await streamer.fail("Stopped.");
       } else {
-        finalText = assistantText(reply);
-        ids = await streamer.finish(finalText);
+        finalText = assistantText(reply).trim();
+        if (!finalText) {
+          // Tools did the work (a poll, an image, a note) and there is nothing to add; or the model gave nothing even when asked again.
+          ids = await streamer.finish(toolsUsed ? "✅" : "I couldn't come up with an answer this time. Please ask again, maybe in other words.");
+          finalText = undefined;
+        } else {
+          // Hit the length limit mid-answer: say so, instead of ending mid-sentence without a hint.
+          ids = await streamer.finish(reply.stopReason === "length" ? `${finalText}\n\n_(cut off at the length limit; reply “continue” for the rest)_` : finalText);
+        }
       }
     } catch (error) {
       // Queued behind another answer when /new or /forget cleared the chat: same as being stopped.

@@ -256,13 +256,22 @@ test("retention: turns older than 7 days are neither sent nor kept, even in a ch
 
 import { FINISH_NOW, isBarePromise } from "../src/agent/sessions.ts";
 
-test("a reply that only promises a lookup is not an answer; reporting a result is", () => {
-  for (const text of ["地点在河南，我按这个再查。", "画面很像陈一发，我核对一下。", "我查一下", "讓我確認一下！", "Let me check.", "I'll look that up…", "One moment."]) {
-    assert.equal(isBarePromise(text), true, text);
-  }
-  for (const text of ["查不到。", "我查過了，是翊聯電子。", "好的，我記住了。", "可以看看官網。", "Checked: it's in Zhengzhou.", "Let me know if you need more.", `我查一下${"。".repeat(0)}，結果：${"x".repeat(60)}`]) {
-    assert.equal(isBarePromise(text), false, text);
-  }
+test("a reply that only promises a lookup is not an answer; results, advice and questions are", () => {
+  const promises = [
+    // seen in the group
+    "地点在河南，我按这个再查。", "画面很像陈一发，我核对一下。", "做超硬材料、又在河南，范围小很多，我按这个查。",
+    "稍等，我搜一下", "我幫你查查", "我帮你查一下", "等我查一下哈", "我去搜搜看", "我再确认下。", "好，马上查。",
+    "收到，我查一下资料。", "我来查一下最新消息。", "我查一下，稍等。", "稍等", "One moment.",
+    "調べてみます。", "確認します！", "Let me check.", "I'll look that up…", "Let me look into it.", "Hold on, checking.",
+  ];
+  const answers = [
+    "唱不了，歌词也不能整段贴。想听的话去油管搜陈一发儿的《童话镇》就行。", "查不到。", "你可以自己查。", "这个不用查，就是台积电。",
+    "我觉得不用查了。", "可以看看官網。", "我查過了，是翊聯電子。", "建議去官網查。", "别查了，没意义。", "我确认是翊联。", "我找到了：在郑州。",
+    "要我查一下嗎？", "Let me know!", "I already checked: it's Zhengzhou.", "You can check the official site.", "好的，我記住了。",
+    `我查一下，结果是：${"翊联电子在郑州，主营超硬材料".repeat(4)}`,
+  ];
+  assert.deepEqual(promises.filter((t) => !isBarePromise(t)), [], "missed promises");
+  assert.deepEqual(answers.filter((t) => isBarePromise(t)), [], "real answers taken for promises");
 });
 
 test("when the model only promises to check, the turn continues once and the answer replaces the promise", { timeout: 5000 }, async () => {
@@ -289,7 +298,7 @@ test("when the model only promises to check, the turn continues once and the ans
   const reply = await sessions.run("tg:-1", { text: "这是什么企业", images: [{ type: "image", data: "AAAA", mimeType: "image/jpeg" }] }, { onText: (t) => shown.push(t) });
   assert.equal((reply.content[0] as { text: string }).text, "查到了：翊联电子，在郑州。");
   assert.equal(requests.length, 2, "continued exactly once");
-  assert.ok(requests[1]!.includes("You said you would check"));
+  assert.ok(requests[1]!.includes("only said you would check"));
   assert.equal(shown.at(-1), "查到了：翊联电子，在郑州。", "the message ends with the answer, not the promise");
   const stored = JSON.parse((db.prepare("SELECT messages FROM chats").get() as { messages: string }).messages) as { role: string; content: unknown }[];
   assert.deepEqual(stored.map((m) => m.role), ["user", "assistant"], "stored as question → answer");
@@ -302,4 +311,37 @@ test("when the model only promises to check, the turn continues once and the ans
   requests.length = 0;
   await sessions.run("tg:-2", { text: "这是什么企业" });
   assert.equal(requests.length, 1);
+});
+
+test("an empty reply is retried once; a turn whose tools did the work (a poll) is not", { timeout: 5000 }, async () => {
+  const db = openDbAt(":memory:");
+  let script: { text: string; tool?: boolean }[] = [];
+  let requests = 0;
+  const pollTool = { name: "create_poll", label: "poll", description: "", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [{ type: "text", text: "Poll posted." }], details: undefined }) };
+  const grok = {
+    model: () => model,
+    streamFn: () => {
+      const step = script[requests++] ?? { text: "unexpected extra request" };
+      const stream = createAssistantMessageEventStream();
+      const content = step.tool ? [{ type: "toolCall", id: "fc_1", name: "create_poll", arguments: {} }] : step.text ? [{ type: "text", text: step.text }] : [];
+      const message = { role: "assistant", content, api: model.api, provider: model.provider, model: model.id, usage: zero, stopReason: step.tool ? "toolUse" : "stop", timestamp: Date.now() } as unknown as AssistantMessage;
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: { ...message, content: [] } });
+        stream.push({ type: "done", reason: message.stopReason as "stop", message });
+      });
+      return stream;
+    },
+  };
+  const sessions = new ChatSessions({ db, grok: grok as never, systemPrompt: () => "", tools: () => [pollTool as never] });
+
+  script = [{ text: "" }, { text: "答案在這裡。" }];
+  const answered = await sessions.run("tg:-1", { text: "問題" });
+  assert.equal((answered.content[0] as { text: string }).text, "答案在這裡。");
+  assert.equal(requests, 2);
+
+  script = [{ text: "", tool: true }, { text: "" }];
+  requests = 0;
+  const polled = await sessions.run("tg:-2", { text: "開個投票" });
+  assert.equal(requests, 2, "the poll call and its (empty) wrap-up, no extra request that could post a second poll");
+  assert.deepEqual(polled.content, []);
 });
