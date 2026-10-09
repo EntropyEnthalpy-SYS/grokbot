@@ -52,12 +52,14 @@ function harness(
     created.push({ prompt, sources: sources?.length ?? 0 });
     return Buffer.from(`jpeg:${prompt}`);
   });
+  const runs: { key: string; ephemeral?: boolean }[] = [];
   const sessions = {
     forgetChat: () => 0,
     reset: () => undefined,
     abort: () => false,
     abortChat: () => 0,
-    run: async (key: string, _input: unknown, handlers: { onStart?: () => void }) => {
+    run: async (key: string, _input: unknown, handlers: { onStart?: () => void }, turn: { ephemeral?: boolean } = {}) => {
+      runs.push({ key, ephemeral: turn.ephemeral });
       handlers.onStart?.();
       const text = options.agent ? await options.agent(images, key, { memory, speakers }) : "ok";
       return { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
@@ -126,7 +128,15 @@ function harness(
     },
   });
   const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
-  return { bot, calls, groups, reminders, memory, speakers, usage, limits, permissions, polls, asked, created, images, groupText, settle, next: () => ++updateId };
+  /** Wait until the bot made a call that `match` accepts (fails the test after `ms`). */
+  const until = async (match: (call: { method: string; payload: Record<string, unknown> }) => boolean, ms = 5000) => {
+    const deadline = Date.now() + ms;
+    while (!calls.some(match)) {
+      if (Date.now() > deadline) throw new Error("timed out waiting for the bot");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  return { bot, calls, runs, until, groups, reminders, memory, speakers, usage, limits, permissions, polls, asked, created, images, groupText, settle, next: () => ++updateId };
 }
 
 test("inline queries reach their handler (they have no chat, unlike every other update)", async () => {
@@ -465,7 +475,7 @@ test("a question asked by voice in private chat is answered as text and as a voi
       voice: { file_id: "v1", file_unique_id: "v1", duration: 3 },
     },
   } as Update);
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  await h.until((c) => c.method === "sendVoice");
   const methods = h.calls.map((c) => c.method).filter((m) => ["sendMessage", "sendVoice"].includes(m));
   assert.deepEqual(methods, ["sendMessage", "sendMessage", "sendVoice"], "transcript, answer, then the voice note");
   assert.match(String(h.calls.find((c) => c.method === "sendMessage")!.payload.text), /現在幾點/);
@@ -543,6 +553,39 @@ test("people with private access can reset their own chat but not use owner comm
   assert.equal(texts[0], "🆕 New conversation.");
   assert.equal(texts[1], "Only the bot owner can do that.");
   assert.ok(texts.some((t) => t.startsWith("⏳ You've reached your limit")));
+});
+
+test("private /tr and /remind count against the question limit like questions do", async () => {
+  const h = harness({ loggedIn: true, ask: () => "translated" });
+  h.permissions.set(STRANGER, "private", true);
+  h.limits.set("questionsPerUserHour", 1);
+  await h.bot.handleUpdate(privateUpdate(h, STRANGER, "first question"));
+  await h.bot.handleUpdate(privateUpdate(h, STRANGER, "/tr en 你好"));
+  await h.bot.handleUpdate(privateUpdate(h, STRANGER, "/tr ja hello"));
+  await h.bot.handleUpdate(privateUpdate(h, STRANGER, "/remind tomorrow 9:00 call the bank"));
+  await h.settle();
+  assert.equal(h.runs.length, 1, "the first question was answered");
+  assert.deepEqual(h.asked, [], "no translation or reminder parsing reached the AI");
+  assert.equal(sentTo(h, STRANGER).filter((t) => t.startsWith("⏳ You've reached your limit")).length, 3);
+
+  // The owner is never limited.
+  await h.bot.handleUpdate(privateUpdate(h, OWNER, "/tr en 你好"));
+  await h.settle();
+  assert.equal(h.asked.length, 1);
+});
+
+test("strict groups answer in a throwaway conversation; normal groups keep one", async () => {
+  const h = harness({ loggedIn: true });
+  h.groups.enable(GROUP, "Grok bot test"); // new groups start strict
+  await h.bot.handleUpdate(h.groupText(5, "grok, strict question"));
+  await h.settle();
+  h.groups.setPrivacy(GROUP, "normal");
+  await h.bot.handleUpdate(h.groupText(5, "grok, normal question"));
+  await h.settle();
+  assert.deepEqual(h.runs.map((r) => [r.key.replace(/:q\d+$/, ":q"), r.ephemeral]), [
+    [`tg:${GROUP}:q`, true],
+    [`tg:${GROUP}`, false],
+  ]);
 });
 
 test("blocked people are ignored everywhere; approved-only groups ignore members who aren't approved", async () => {

@@ -68,7 +68,7 @@ All settings are environment variables; see [`.env.example`](.env.example). Only
 
 ## Data and privacy
 
-- Stored: settings, notes, reminders, usage counts (no content), permissions, provider logins, and — in `normal` groups only — 7 days of group messages and bot conversations. `/forget` deletes a chat's data; `/disable` removes a group.
+- Stored: settings, notes, reminders, usage counts (no content), permissions, provider logins, the last 7 days of conversations with the bot in private chats and `normal` groups (older turns are dropped even while a chat stays active), and 7 days of group messages in `normal` groups. `strict` groups store neither. `/forget` deletes a chat's data; `/disable` removes a group.
 - `strict` groups store no messages and send Grok only the question and the message it replies to.
 - Backups from `/admin` exclude logins and API keys.
 - Requests are sent with `store: false`. Check your provider's data settings (e.g. grok.com → Settings → Data Controls).

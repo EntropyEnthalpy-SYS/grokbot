@@ -3,7 +3,7 @@ import http from "node:http";
 import https from "node:https";
 import { BlockList, isIP, type LookupFunction } from "node:net";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
-import type { Readable } from "node:stream";
+import { addAbortSignal, pipeline, type Readable } from "node:stream";
 
 /**
  * Fetch a public web page without letting group members aim the bot at the
@@ -155,10 +155,10 @@ async function readBody(
   signal: AbortSignal,
 ): Promise<{ body: string; truncated: boolean }> {
   const encoding = String(response.headers["content-encoding"] ?? "").toLowerCase();
-  let stream: Readable = response;
-  if (encoding === "gzip") stream = response.pipe(createGunzip());
-  else if (encoding === "deflate") stream = response.pipe(createInflate());
-  else if (encoding === "br") stream = response.pipe(createBrotliDecompress());
+  const decoder = encoding === "gzip" ? createGunzip() : encoding === "deflate" ? createInflate() : encoding === "br" ? createBrotliDecompress() : undefined;
+  // pipeline() destroys the decoder when the response fails or is aborted (pipe() would leave it
+  // waiting forever for data that never comes), and the abort signal ends a stalled read.
+  const stream: Readable = addAbortSignal(signal, decoder ? pipeline(response, decoder, () => undefined) : response);
   const chunks: Buffer[] = [];
   let size = 0;
   let truncated = false;
@@ -175,6 +175,7 @@ async function readBody(
       size += buffer.length;
     }
   } finally {
+    decoder?.destroy();
     response.destroy();
   }
   return { body: Buffer.concat(chunks).toString("utf8"), truncated };

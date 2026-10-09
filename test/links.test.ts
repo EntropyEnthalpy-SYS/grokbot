@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { gzipSync } from "node:zlib";
+import { brotliCompressSync, deflateSync, gzipSync } from "node:zlib";
 import { after, before, test } from "node:test";
 import { openDbAt } from "../src/db.ts";
 import { extractLinks, linkKind, normalizeUrl } from "../src/links/detect.ts";
@@ -60,13 +60,26 @@ before(async () => {
     if (req.url === "/redirect-internal") return res.writeHead(302, { Location: "http://10.0.0.1/secret" }).end();
     if (req.url === "/redirect-ok") return res.writeHead(301, { Location: "/page" }).end();
     if (req.url === "/big") return res.writeHead(200, { "Content-Type": "text/plain" }).end("x".repeat(5000));
+    if (req.url === "/big-gzip") return res.writeHead(200, { "Content-Type": "text/plain", "Content-Encoding": "gzip" }).end(gzipSync("x".repeat(5000)));
+    // Sends the first part of a body, then stalls forever without closing the connection.
+    const stall = req.url?.match(/^\/stall-(plain|gzip|deflate|br)$/)?.[1];
+    if (stall) {
+      const body = Buffer.from("y".repeat(100_000));
+      const encoded = { plain: body, gzip: gzipSync(body), deflate: deflateSync(body), br: brotliCompressSync(body) }[stall]!;
+      res.writeHead(200, { "Content-Type": "text/plain", ...(stall === "plain" ? {} : { "Content-Encoding": stall }) });
+      res.write(encoded.subarray(0, Math.min(20, encoded.length - 1)));
+      return;
+    }
     const html = "<html><head><title>T &amp; T</title><script>steal()</script></head><body><nav>menu</nav><article><h1>Head</h1><p>Body text here.</p></article></body></html>";
     res.writeHead(200, { "Content-Type": "text/html", "Content-Encoding": "gzip" }).end(gzipSync(html));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 });
-after(() => server.close());
+after(() => {
+  server.closeAllConnections();
+  server.close();
+});
 
 // Tests reach the local server by treating only 127.0.0.1 as public.
 const onlyLoopbackAllowed = (address: string) => address !== "127.0.0.1";
@@ -88,6 +101,20 @@ test("decodes gzip and caps the body size", async () => {
   const page = await safeFetch(`${base}/big`, { isBlocked: onlyLoopbackAllowed, maxBytes: 1000 });
   assert.equal(page.body.length, 1000);
   assert.equal(page.truncated, true);
+});
+
+test("decodes compressed bodies and still caps their size", async () => {
+  const page = await safeFetch(`${base}/big-gzip`, { isBlocked: onlyLoopbackAllowed, maxBytes: 1000 });
+  assert.equal(page.body, "x".repeat(1000));
+  assert.equal(page.truncated, true);
+});
+
+test("the timeout ends a body that stalls mid-way, compressed or not", async () => {
+  for (const encoding of ["plain", "gzip", "deflate", "br"]) {
+    const started = Date.now();
+    await assert.rejects(safeFetch(`${base}/stall-${encoding}`, { isBlocked: onlyLoopbackAllowed, timeoutMs: 100 }), encoding);
+    assert.ok(Date.now() - started < 2000, `${encoding} took ${Date.now() - started} ms`);
+  }
 });
 
 test("htmlToText keeps the article and drops scripts and navigation", () => {

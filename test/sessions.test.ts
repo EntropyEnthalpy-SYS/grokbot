@@ -114,3 +114,142 @@ test("saved notes reach Grok in the system prompt of every request, but are neve
   const stored = (db.prepare("SELECT messages FROM chats").get() as { messages: string }).messages;
   assert.doesNotMatch(stored, /小明吃素|小美對花生過敏/);
 });
+
+import { CONVERSATION_RETENTION_MS, dropExpired, TurnCancelledError } from "../src/agent/sessions.ts";
+
+const DAY = 24 * 60 * 60 * 1000;
+const at = (role: string, tag: string, timestamp: number) => ({ role, tag, timestamp }) as unknown as AgentMessage;
+
+/** A Grok that records each request and answers only when the test releases that request. */
+function gatedGrok() {
+  const requests: { texts: string; release: () => void }[] = [];
+  let arrived: () => void = () => undefined;
+  const grok = {
+    model: () => model,
+    streamFn: (_model: unknown, context: { messages: { content: unknown }[] }, options?: { signal?: AbortSignal }) => {
+      const stream = createAssistantMessageEventStream();
+      const message: AssistantMessage = { role: "assistant", content: [{ type: "text", text: "answer" }], api: model.api, provider: model.provider, model: model.id, usage: zero, stopReason: "stop", timestamp: Date.now() };
+      stream.push({ type: "start", partial: { ...message, content: [] } });
+      options?.signal?.addEventListener("abort", () => stream.push({ type: "error", reason: "aborted", error: { ...message, content: [], stopReason: "aborted" } }));
+      requests.push({ texts: JSON.stringify(context.messages.map((m) => m.content)), release: () => stream.push({ type: "done", reason: "stop", message }) });
+      arrived();
+      return stream;
+    },
+  };
+  /** Resolves once `count` requests have reached Grok. */
+  const requested = (count: number) =>
+    new Promise<void>((resolve) => {
+      const check = () => (requests.length >= count ? resolve() : (arrived = check));
+      check();
+    });
+  return { grok, requests, requested };
+}
+
+/** The database, recording every SQL statement prepared on it. */
+function recordingDb() {
+  const db = openDbAt(":memory:");
+  const statements: string[] = [];
+  const prepare = db.prepare.bind(db);
+  db.prepare = ((sql: string) => {
+    statements.push(sql);
+    return prepare(sql);
+  }) as typeof db.prepare;
+  return { db, statements };
+}
+
+test("dropExpired starts at the first recent question and never keeps a tool result without its call", () => {
+  const cutoff = 1000;
+  const messages = [
+    at("system", "s", 0),
+    at("user", "u1", 10),
+    at("assistant", "a1-call", 20),
+    at("toolResult", "t1", cutoff + 5), // recent timestamp, but its question is old
+    at("assistant", "a1", cutoff + 6),
+    at("user", "u2", cutoff), // exactly at the cutoff: kept
+    at("assistant", "a2", cutoff + 1),
+  ];
+  assert.deepEqual(tags(dropExpired(messages, cutoff)), ["s", "u2", "a2"]);
+  assert.deepEqual(tags(dropExpired(messages, cutoff + 1)), ["s"], "nothing recent left");
+  assert.deepEqual(tags(dropExpired(messages, 0)), tags(messages), "nothing expired");
+});
+
+test("strict (ephemeral) turns never touch the conversations table, and /stop can still abort them", { timeout: 5000 }, async () => {
+  const { db, statements } = recordingDb();
+  const fake = gatedGrok();
+  const sessions = new ChatSessions({ db, grok: fake.grok as never, systemPrompt: () => "" });
+  const before = statements.length;
+
+  const done = sessions.run("tg:-1:q7", { text: "strict secret" }, {}, { ephemeral: true });
+  await fake.requested(1);
+  fake.requests[0]!.release();
+  const reply = await done;
+  assert.equal(reply.stopReason, "stop");
+  assert.deepEqual(statements.slice(before).filter((sql) => /\bchats\b/.test(sql)), [], "no read, write or delete of stored conversations");
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM chats").get() as { n: number }).n, 0);
+
+  const stopped = sessions.run("tg:-1:q8", { text: "stop me" }, {}, { ephemeral: true });
+  await fake.requested(2);
+  assert.equal(sessions.abortChat(-1), 1, "the running strict answer is found by /stop");
+  assert.equal((await stopped).stopReason, "aborted");
+  assert.equal(sessions.abort("tg:-1:q8"), false, "the throwaway agent is gone afterwards");
+});
+
+test("/forget cancels questions queued behind a running answer, so they can't recreate the history", { timeout: 5000 }, async () => {
+  const db = openDbAt(":memory:");
+  const fake = gatedGrok();
+  const sessions = new ChatSessions({ db, grok: fake.grok as never, systemPrompt: () => "" });
+  const rows = () => (db.prepare("SELECT messages FROM chats").all() as { messages: string }[]).map((r) => r.messages);
+
+  const running = sessions.run("tg:-1", { text: "first secret" }).catch((error: unknown) => error);
+  await fake.requested(1);
+  let queuedStarted = false;
+  const queued = sessions.run("tg:-1", { text: "queued secret" }, { onStart: () => (queuedStarted = true) }).catch((error: unknown) => error);
+  sessions.forgetChat(-1);
+  fake.requests[0]!.release();
+  await running;
+  assert.ok((await queued) instanceof TurnCancelledError);
+  assert.equal(queuedStarted, false);
+  assert.equal(fake.requests.length, 1, "the queued question never reached the provider");
+  assert.deepEqual(rows(), []);
+  assert.equal(sessions.pendingChats, 0);
+
+  // A question asked after /forget runs normally, with none of the forgotten text.
+  const after = sessions.run("tg:-1", { text: "fresh start" });
+  await fake.requested(2);
+  fake.requests[1]!.release();
+  await after;
+  assert.doesNotMatch(fake.requests[1]!.texts, /secret/);
+  assert.equal(rows().length, 1);
+  assert.doesNotMatch(rows()[0]!, /secret/);
+  assert.match(rows()[0]!, /fresh start/);
+});
+
+test("retention: turns older than 7 days are neither sent nor kept, even in a chat that stays active", { timeout: 5000 }, async () => {
+  const db = openDbAt(":memory:");
+  const now = Date.now();
+  const user = (text: string, timestamp: number) => ({ role: "user", content: [{ type: "text", text }], timestamp });
+  const assistant = (text: string, timestamp: number) => ({ role: "assistant", content: [{ type: "text", text }], api: model.api, provider: model.provider, model: model.id, usage: zero, stopReason: "stop", timestamp });
+  const history = [user("eight days old", now - 8 * DAY), assistant("old answer", now - 8 * DAY), user("two days old", now - 2 * DAY), assistant("recent answer", now - 2 * DAY)];
+  const insert = db.prepare("INSERT INTO chats (chat_key, messages, updated_at) VALUES (?, ?, ?)");
+  insert.run("tg:-1", JSON.stringify(history), now - DAY); // active yesterday
+  insert.run("tg:-2", JSON.stringify(history), now - DAY);
+  insert.run("tg:-3", JSON.stringify(history.slice(2)), now - 8 * DAY); // idle for 8 days
+  const fake = gatedGrok();
+  const sessions = new ChatSessions({ db, grok: fake.grok as never, systemPrompt: () => "" });
+  const stored = (key: string) => (db.prepare("SELECT messages FROM chats WHERE chat_key = ?").get(key) as { messages: string } | undefined)?.messages;
+
+  const turn = sessions.run("tg:-1", { text: "today" });
+  await fake.requested(1);
+  fake.requests[0]!.release();
+  await turn;
+  assert.doesNotMatch(fake.requests[0]!.texts, /eight days old|old answer/);
+  assert.match(fake.requests[0]!.texts, /two days old/);
+  assert.doesNotMatch(stored("tg:-1")!, /eight days old/);
+
+  // Housekeeping trims chats nobody wrote in since, and deletes idle ones.
+  assert.equal(sessions.prune(now), 1);
+  assert.doesNotMatch(stored("tg:-2")!, /eight days old|old answer/);
+  assert.match(stored("tg:-2")!, /two days old/);
+  assert.equal(stored("tg:-3"), undefined);
+  assert.equal(CONVERSATION_RETENTION_MS, 7 * DAY);
+});

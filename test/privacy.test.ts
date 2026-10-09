@@ -41,7 +41,7 @@ function sessionsWith(rows: Record<string, number>) {
 test("conversations unused for 7 days expire", () => {
   const now = 10 * 24 * 3600 * 1000;
   const { sessions, keys } = sessionsWith({ "tg:-1": now - 8 * 24 * 3600 * 1000, "tg:-2": now - 3600 * 1000 });
-  assert.equal(sessions.prune(7 * 24 * 3600 * 1000, now), 1);
+  assert.equal(sessions.prune(now), 1);
   assert.deepEqual(keys(), ["tg:-2"]);
 });
 

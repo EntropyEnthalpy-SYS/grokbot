@@ -135,7 +135,7 @@ const housekeeping = () => {
   cache.prune();
   usage.prune();
   // Conversations with the bot expire like the group log.
-  sessions.prune(7 * 24 * 60 * 60 * 1000);
+  sessions.prune();
   void removeStaleMedia(`${config.dataDir}/media`, 60 * 60 * 1000);
   // Files the local Bot API server downloaded for us; they are only needed while processing.
   if (config.telegramApiRoot) void removeOldFiles(`${config.dataDir}/tgapi`, 24 * 60 * 60 * 1000);

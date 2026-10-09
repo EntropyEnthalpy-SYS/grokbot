@@ -7,10 +7,24 @@ import { isServerSideToolCall, stripServerSideToolCalls, type Grok } from "../gr
 export const CONTEXT_MESSAGES = 60;
 /** Messages kept in the database per chat. */
 export const STORED_MESSAGES = 200;
+/** Turns older than this are dropped from conversations, even while the chat stays active. */
+export const CONVERSATION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface TurnInput {
   text: string;
   images?: ImageContent[];
+}
+
+export interface TurnOptions {
+  /** Strict privacy: start with no history, never read or write the database, forget the turn afterwards. */
+  ephemeral?: boolean;
+}
+
+/** A queued turn whose conversation was cleared (/new, /forget, /disable) before it started. */
+export class TurnCancelledError extends Error {
+  constructor() {
+    super("The conversation was cleared before this question started.");
+  }
 }
 
 export interface TurnHandlers {
@@ -30,8 +44,14 @@ export class ChatSessions {
   readonly #systemPrompt: (chatKey: string) => string;
   readonly #tools: (chatKey: string) => AgentTool[];
   readonly #systemExtra: (chatKey: string) => string;
+  readonly #retentionMs: number;
   readonly #agents = new Map<string, Agent>();
   readonly #queues = new Map<string, Promise<unknown>>();
+  /**
+   * Bumped by reset() while turns are queued, so turns queued before a reset don't start and
+   * recreate the history. Only kept while the chat has queued turns.
+   */
+  readonly #generations = new Map<string, number>();
 
   constructor(options: {
     db: Db;
@@ -40,44 +60,72 @@ export class ChatSessions {
     tools?: (chatKey: string) => AgentTool[];
     /** Appended to the system prompt on every request (e.g. the chat's saved notes); never stored. */
     systemExtra?: (chatKey: string) => string;
+    retentionMs?: number;
   }) {
     this.#db = options.db;
     this.#grok = options.grok;
     this.#systemPrompt = options.systemPrompt;
     this.#tools = options.tools ?? (() => []);
     this.#systemExtra = options.systemExtra ?? (() => "");
+    this.#retentionMs = options.retentionMs ?? CONVERSATION_RETENTION_MS;
   }
 
-  run(chatKey: string, input: TurnInput, handlers: TurnHandlers = {}): Promise<AssistantMessage> {
+  run(chatKey: string, input: TurnInput, handlers: TurnHandlers = {}, options: TurnOptions = {}): Promise<AssistantMessage> {
+    const generation = this.#generation(chatKey);
     const previous = this.#queues.get(chatKey) ?? Promise.resolve();
-    const turn = previous.catch(() => undefined).then(() => this.#runTurn(chatKey, input, handlers));
+    const turn = previous.catch(() => undefined).then(() => this.#runTurn(chatKey, input, handlers, generation, options.ephemeral ?? false));
     this.#queues.set(chatKey, turn);
     const done = () => {
-      if (this.#queues.get(chatKey) === turn) this.#queues.delete(chatKey);
+      if (this.#queues.get(chatKey) !== turn) return;
+      this.#queues.delete(chatKey);
+      this.#generations.delete(chatKey);
     };
     turn.then(done, done);
     return turn;
   }
 
-  /** Delete stored conversations not used for `maxAgeMs`, and their in-memory agents. */
-  prune(maxAgeMs: number, now = Date.now()): number {
-    const stale = this.#db.prepare("SELECT chat_key FROM chats WHERE updated_at < ?").all(now - maxAgeMs) as { chat_key: string }[];
-    for (const { chat_key } of stale) this.reset(chat_key);
-    return stale.length;
+  /**
+   * Retention: delete conversations not used for the retention period, and drop
+   * older turns from the ones still in use (stored and in memory).
+   */
+  prune(now = Date.now()): number {
+    const cutoff = now - this.#retentionMs;
+    const rows = this.#db.prepare("SELECT chat_key, messages, updated_at FROM chats").all() as {
+      chat_key: string;
+      messages: string;
+      updated_at: number;
+    }[];
+    let deleted = 0;
+    for (const row of rows) {
+      const messages = JSON.parse(row.messages) as AgentMessage[];
+      const kept = dropExpired(messages, cutoff);
+      if (row.updated_at < cutoff || (kept.length === 0 && messages.length > 0)) {
+        this.reset(row.chat_key);
+        deleted++;
+      } else if (kept.length !== messages.length) {
+        this.#db.prepare("UPDATE chats SET messages = ? WHERE chat_key = ?").run(JSON.stringify(kept), row.chat_key);
+      }
+    }
+    for (const agent of this.#agents.values()) {
+      if (!agent.state.isStreaming) agent.state.messages = dropExpired(agent.state.messages, cutoff);
+    }
+    return deleted;
   }
 
-  /** Delete every conversation of a chat (all forum topics). */
+  /** Delete every conversation of a chat (all forum topics), and cancel its queued turns. */
   forgetChat(chatId: number): number {
     const keys = this.#db
       .prepare("SELECT chat_key FROM chats WHERE chat_key = ? OR chat_key LIKE ?")
       .all(`tg:${chatId}`, `tg:${chatId}:%`) as { chat_key: string }[];
-    for (const key of new Set([...keys.map((k) => k.chat_key), ...[...this.#agents.keys()].filter((k) => k === `tg:${chatId}` || k.startsWith(`tg:${chatId}:`))])) {
-      this.reset(key);
-    }
+    const ofChat = (key: string) => key === `tg:${chatId}` || key.startsWith(`tg:${chatId}:`);
+    const live = [...this.#agents.keys(), ...this.#queues.keys()].filter(ofChat);
+    for (const key of new Set([...keys.map((k) => k.chat_key), ...live])) this.reset(key);
     return keys.length;
   }
 
+  /** Delete a conversation: stop its running turn and cancel the turns queued behind it. */
   reset(chatKey: string): void {
+    if (this.#queues.has(chatKey)) this.#generations.set(chatKey, this.#generation(chatKey) + 1);
     this.#agents.get(chatKey)?.abort();
     this.#agents.delete(chatKey);
     this.#db.prepare("DELETE FROM chats WHERE chat_key = ?").run(chatKey);
@@ -107,12 +155,18 @@ export class ChatSessions {
     return true;
   }
 
-  async #runTurn(chatKey: string, input: TurnInput, handlers: TurnHandlers): Promise<AssistantMessage> {
+  #generation(chatKey: string): number {
+    return this.#generations.get(chatKey) ?? 0;
+  }
+
+  async #runTurn(chatKey: string, input: TurnInput, handlers: TurnHandlers, generation: number, ephemeral: boolean): Promise<AssistantMessage> {
+    if (generation !== this.#generation(chatKey)) throw new TurnCancelledError();
     handlers.onStart?.();
-    const agent = this.#agent(chatKey);
+    // Ephemeral agents are registered too, so /stop and reset() can abort them.
+    const agent = ephemeral ? this.#newAgent(chatKey, []) : (this.#agents.get(chatKey) ?? this.#newAgent(chatKey, this.#load(chatKey)));
     // Pick up /model and /route changes made since the agent was created.
     agent.state.model = this.#grok.model();
-    agent.state.messages = dropOldImages(agent.state.messages);
+    agent.state.messages = dropOldImages(dropExpired(agent.state.messages, Date.now() - this.#retentionMs));
 
     let text = "";
     const unsubscribe = agent.subscribe((event: AgentEvent) => {
@@ -128,23 +182,26 @@ export class ChatSessions {
     } finally {
       unsubscribe();
       // reset() (/new, /forget, /privacy strict) removed this agent mid-turn: don't write the history back.
-      if (this.#agents.get(chatKey) === agent) this.#save(chatKey, agent.state.messages);
+      const current = this.#agents.get(chatKey) === agent && generation === this.#generation(chatKey);
+      if (ephemeral) {
+        if (this.#agents.get(chatKey) === agent) this.#agents.delete(chatKey);
+      } else if (current) {
+        this.#save(chatKey, agent.state.messages);
+      }
     }
     const reply = lastAssistant(agent.state.messages);
     if (!reply) throw new Error("Grok returned no reply");
     return reply;
   }
 
-  #agent(chatKey: string): Agent {
-    const existing = this.#agents.get(chatKey);
-    if (existing) return existing;
+  #newAgent(chatKey: string, messages: AgentMessage[]): Agent {
     const agent = new Agent({
       initialState: {
         systemPrompt: this.#systemPrompt(chatKey),
         model: this.#grok.model(),
         thinkingLevel: "low",
         tools: this.#tools(chatKey),
-        messages: this.#load(chatKey),
+        messages,
       },
       streamFn: this.#grok.streamFn,
       transformContext: async (messages) => withSystemExtra(trimContext(messages, CONTEXT_MESSAGES), this.#systemExtra(chatKey)),
@@ -197,6 +254,23 @@ export function trimContext(messages: readonly AgentMessage[], limit: number): A
   let start = rest.length - limit;
   while (start < rest.length && rest[start]?.role !== "user") start++;
   return [...system, ...rest.slice(start)];
+}
+
+/**
+ * Drop turns that started before `cutoff`. Keeps leading system messages and
+ * starts at a user message, so a tool result is never separated from its call.
+ */
+export function dropExpired(messages: readonly AgentMessage[], cutoff: number): AgentMessage[] {
+  let head = 0;
+  while (head < messages.length && messages[head]?.role === "system") head++;
+  let start = head;
+  while (start < messages.length) {
+    const message = messages[start] as AgentMessage & { timestamp?: number };
+    if (message.role === "user" && (message.timestamp ?? 0) >= cutoff) break;
+    start++;
+  }
+  if (start === head) return [...messages];
+  return [...messages.slice(0, head), ...messages.slice(start)];
 }
 
 /**

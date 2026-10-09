@@ -17,7 +17,7 @@ import { InputFile as VoiceFile } from "grammy";
 import { MAX_FACTS_PER_CHAT, type MemoryStore } from "../memory.ts";
 import type { Message } from "grammy/types";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import type { ChatSessions } from "../agent/sessions.ts";
+import { TurnCancelledError, type ChatSessions } from "../agent/sessions.ts";
 import { assistantText, CHAT_PROVIDERS, errorMessage, ROUTES, type Grok, type ProbeResult, type Route } from "../grok/grok.ts";
 import { linkKind } from "../links/detect.ts";
 import { untrusted } from "../links/reader.ts";
@@ -161,6 +161,8 @@ type ChatTarget = {
   logGroup?: { chatId: number; threadId: number };
   /** The question came by voice: answer with a voice note too. */
   speak?: boolean;
+  /** Strict privacy: the conversation is never stored. */
+  ephemeral?: boolean;
 };
 
 /** Commands whose replies only the sender sees in groups (Telegram ephemeral commands, Bot API 10.2). */
@@ -747,7 +749,7 @@ export function createBot({
     if (!ownText && !source) {
       return ctx.reply(`Reply to a message (text, voice or photo) with /tr to translate it. Other language: /tr en (${Object.keys(LANGUAGES).filter((l) => l !== "off").join(", ")}).`);
     }
-    if (isGroup(ctx) && !mayAsk(ctx, chatId)) return refuseOverLimit(ctx, message, threadId);
+    if (!mayAsk(ctx, chatId)) return refuseOverLimit(ctx, message, threadId);
     const groupLang = isGroup(ctx) ? groups.language(chatId) : defaultLanguage();
     const lang = explicit ?? (groupLang === "off" ? defaultLanguage() : groupLang);
     background(ctx, async () => {
@@ -821,7 +823,7 @@ export function createBot({
         "Examples:\n/remind tomorrow 9:00 call the bank\n/remind 週五晚上8點 開會\n/remind every Monday 10:00 weekly report\n/remind in 30 minutes check the oven\n\nOr just say: grok, 提醒我們明天下午3點交報告",
       );
     }
-    if (isGroup(ctx) && !mayAsk(ctx, ctx.chat.id)) return refuseOverLimit(ctx, message, threadIdOf(message));
+    if (!mayAsk(ctx, ctx.chat.id)) return refuseOverLimit(ctx, message, threadIdOf(message));
     background(ctx, async () => {
       const failure = await createReminder(ctx, message, request);
       if (failure) await ctx.reply(`⏰ I couldn't set that: ${failure}. Try e.g. /remind Friday 20:00 meeting`);
@@ -897,10 +899,7 @@ export function createBot({
     }
     if (isGroup(ctx)) return onGroupMessage(ctx, message);
     // People with private access have the same per-person limits as in groups.
-    if (!mayAsk(ctx, ctx.chat.id)) {
-      const minutes = Math.max(1, Math.ceil(userQuestions.retryAfter(String(ctx.from.id)) / 60_000));
-      return ctx.reply(`⏳ You've reached your limit for now. Try again in about ${minutes} min. (/stats)`);
-    }
+    if (!mayAsk(ctx, ctx.chat.id)) return refuseOverLimit(ctx, message, 0);
     const key = sessionKey(ctx.chat.id, 0);
     if (message.text) return background(ctx, () => chat(ctx, { text: message.text! }, { key }));
     if (message.photo) {
@@ -960,7 +959,10 @@ export function createBot({
     }
   }
 
-  /** Per-member and per-group question budgets; the owner is never limited. */
+  /**
+   * Per-member and per-chat question budgets for everything that uses the AI on someone's
+   * request (questions, /tr, /remind), in groups and private chats; the owner is never limited.
+   */
   function mayAsk(ctx: Context, chatId: number): boolean {
     if (unlimited(ctx)) return true;
     return userQuestions.take(String(ctx.from?.id ?? 0)) && groupQuestions.take(String(chatId));
@@ -968,9 +970,13 @@ export function createBot({
 
   function refuseOverLimit(ctx: Context, message: Message, threadId: number): void {
     const user = String(ctx.from?.id ?? 0);
-    if (!limitNotices.take(user)) return; // one notice per member per 10 minutes, not one per message
     const waitMs = Math.max(userQuestions.retryAfter(user), groupQuestions.retryAfter(String(ctx.chat!.id)));
     const minutes = Math.max(1, Math.ceil(waitMs / 60_000));
+    if (!isGroup(ctx)) {
+      void ctx.reply(`⏳ You've reached your limit for now. Try again in about ${minutes} min. (/stats)`).catch(() => undefined);
+      return;
+    }
+    if (!limitNotices.take(user)) return; // one notice per member per 10 minutes, not one per message
     void notifyMember(ctx, `⏳ Too many questions right now. Please try again in about ${minutes} min. (/stats shows your usage)`, threadId).catch(
       () => undefined,
     );
@@ -1026,14 +1032,10 @@ export function createBot({
         : undefined,
     });
     if (notes.length) prompt += `\n\n${untrusted("attached-media", notes.join("\n\n"))}`;
-    // Strict: a throwaway conversation per question, deleted right after; nothing earlier is re-sent.
+    // Strict: a throwaway conversation per question that is never written to disk; nothing earlier is re-sent.
     const key = strict ? `${sessionKey(chatId, threadId)}:q${message.message_id}` : sessionKey(chatId, threadId);
-    try {
-      const speak = ownText !== undefined && groups.voiceReply(chatId);
-      await chat(ctx, { text: prompt, images }, { key, replyTo: message.message_id, threadId, logGroup: { chatId, threadId }, speak });
-    } finally {
-      if (strict) sessions.reset(key);
-    }
+    const speak = ownText !== undefined && groups.voiceReply(chatId);
+    await chat(ctx, { text: prompt, images }, { key, replyTo: message.message_id, threadId, logGroup: { chatId, threadId }, speak, ephemeral: strict });
   }
 
   /** Transcribe a group voice note (with a translation when it's in another language). "grok, …" by voice is a question. */
@@ -1266,16 +1268,21 @@ export function createBot({
     // one's cleanup runs, so cleanup removes only our own entry.
     const speaker = { userId: ctx.from?.id, userName: displayName(ctx.from) };
     try {
-      const reply = await sessions.run(target.key, input, {
-        onStart: () => {
-          imageTurn = images.begin(target.key, { userId: ctx.from?.id, unlimited: isOwner(ctx), attached: input.images });
-          speakers.set(target.key, speaker);
+      const reply = await sessions.run(
+        target.key,
+        input,
+        {
+          onStart: () => {
+            imageTurn = images.begin(target.key, { userId: ctx.from?.id, unlimited: isOwner(ctx), attached: input.images });
+            speakers.set(target.key, speaker);
+          },
+          onText: (text) => {
+            typing.stop();
+            streamer.update(text);
+          },
         },
-        onText: (text) => {
-          typing.stop();
-          streamer.update(text);
-        },
-      });
+        { ephemeral: target.ephemeral },
+      );
       if (reply.stopReason === "error") {
         await streamer.fail(friendlyError(reply.errorMessage ?? "unknown error", grok.route, isOwner(ctx)));
       } else if (reply.stopReason === "aborted") {
@@ -1285,7 +1292,8 @@ export function createBot({
         ids = await streamer.finish(finalText);
       }
     } catch (error) {
-      await streamer.fail(friendlyError(errorMessage(error), grok.route, isOwner(ctx)));
+      // Queued behind another answer when /new or /forget cleared the chat: same as being stopped.
+      await streamer.fail(error instanceof TurnCancelledError ? "Stopped." : friendlyError(errorMessage(error), grok.route, isOwner(ctx)));
     } finally {
       typing.stop();
       if (speakers.get(target.key) === speaker) speakers.delete(target.key);
