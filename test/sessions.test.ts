@@ -253,3 +253,53 @@ test("retention: turns older than 7 days are neither sent nor kept, even in a ch
   assert.equal(stored("tg:-3"), undefined);
   assert.equal(CONVERSATION_RETENTION_MS, 7 * DAY);
 });
+
+import { FINISH_NOW, isBarePromise } from "../src/agent/sessions.ts";
+
+test("a reply that only promises a lookup is not an answer; reporting a result is", () => {
+  for (const text of ["地点在河南，我按这个再查。", "画面很像陈一发，我核对一下。", "我查一下", "讓我確認一下！", "Let me check.", "I'll look that up…", "One moment."]) {
+    assert.equal(isBarePromise(text), true, text);
+  }
+  for (const text of ["查不到。", "我查過了，是翊聯電子。", "好的，我記住了。", "可以看看官網。", "Checked: it's in Zhengzhou.", "Let me know if you need more.", `我查一下${"。".repeat(0)}，結果：${"x".repeat(60)}`]) {
+    assert.equal(isBarePromise(text), false, text);
+  }
+});
+
+test("when the model only promises to check, the turn continues once and the answer replaces the promise", { timeout: 5000 }, async () => {
+  const db = openDbAt(":memory:");
+  const replies = ["我核对一下。", "查到了：翊联电子，在郑州。"];
+  const requests: string[] = [];
+  const shown: string[] = [];
+  const grok = {
+    model: () => model,
+    streamFn: (_model: unknown, context: { messages: { role: string; content: unknown }[] }) => {
+      requests.push(JSON.stringify(context.messages.filter((m) => m.role === "user").map((m) => m.content)));
+      const text = replies[requests.length - 1] ?? "unexpected third request";
+      const stream = createAssistantMessageEventStream();
+      const message: AssistantMessage = { role: "assistant", content: [{ type: "text", text }], api: model.api, provider: model.provider, model: model.id, usage: zero, stopReason: "stop", timestamp: Date.now() };
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: { ...message, content: [] } });
+        stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
+        stream.push({ type: "done", reason: "stop", message });
+      });
+      return stream;
+    },
+  };
+  const sessions = new ChatSessions({ db, grok: grok as never, systemPrompt: () => "" });
+  const reply = await sessions.run("tg:-1", { text: "这是什么企业", images: [{ type: "image", data: "AAAA", mimeType: "image/jpeg" }] }, { onText: (t) => shown.push(t) });
+  assert.equal((reply.content[0] as { text: string }).text, "查到了：翊联电子，在郑州。");
+  assert.equal(requests.length, 2, "continued exactly once");
+  assert.ok(requests[1]!.includes("You said you would check"));
+  assert.equal(shown.at(-1), "查到了：翊联电子，在郑州。", "the message ends with the answer, not the promise");
+  const stored = JSON.parse((db.prepare("SELECT messages FROM chats").get() as { messages: string }).messages) as { role: string; content: unknown }[];
+  assert.deepEqual(stored.map((m) => m.role), ["user", "assistant"], "stored as question → answer");
+  assert.match(JSON.stringify(stored[0]!.content), /"type":"image"/, "the question's photo is still there for a follow-up");
+  assert.doesNotMatch(JSON.stringify(stored), /核对一下|automatic note/);
+  assert.ok(FINISH_NOW.startsWith("(automatic note)"));
+
+  // A real short answer is not continued.
+  replies.splice(0, 2, "查不到。");
+  requests.length = 0;
+  await sessions.run("tg:-2", { text: "这是什么企业" });
+  assert.equal(requests.length, 1);
+});

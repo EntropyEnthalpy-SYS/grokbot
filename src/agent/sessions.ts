@@ -179,6 +179,16 @@ export class ChatSessions {
     });
     try {
       await agent.prompt(input.text, input.images);
+      // "我查一下。" and nothing else: the bot can't send a second message later, so make it do the work now (once).
+      const first = lastAssistant(agent.state.messages);
+      if (first?.stopReason === "stop" && isBarePromise(assistantText(first))) {
+        await agent.prompt(FINISH_NOW);
+        // Keep the conversation as question → answer: the promise and the note go, the question's photos stay the latest.
+        const promiseAt = agent.state.messages.indexOf(first);
+        if (lastAssistant(agent.state.messages)?.stopReason === "stop" && agent.state.messages[promiseAt + 1]?.role === "user") {
+          agent.state.messages = agent.state.messages.filter((_, i) => i !== promiseAt && i !== promiseAt + 1);
+        }
+      }
     } finally {
       unsubscribe();
       // reset() (/new, /forget, /privacy strict) removed this agent mid-turn: don't write the history back.
@@ -318,6 +328,26 @@ export function cleanHistory(messages: readonly AgentMessage[]): AgentMessage[] 
     }
   }
   return cleaned;
+}
+
+/** Sent when a reply only promised to look something up. */
+export const FINISH_NOW =
+  "(automatic note) You said you would check, but you can't send another message later. Do it now with your tools (search, read_link…) and give the result in this reply. If you can't find it, say what you found and what's missing.";
+
+/**
+ * A short reply that only announces a lookup ("地点在河南，我按这个再查。", "我核对一下。",
+ * "Let me check.") instead of answering. Answers that report a result ("查不到。") don't count.
+ */
+export function isBarePromise(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > 60) return false;
+  const zh = /(我|讓我|让我)?(先|再|去|來|来|按這個|按这个|馬上|马上)*(查|搜|搜尋|搜索|找|核對|核对|確認|确认|看看|查查|查詢|查询)(一下|一查|看看)?[\s。．.！!…~～]*$/;
+  const en = /\b(let me (check|look|search|verify|find)|i'?ll (check|look|search|verify|find)|i will (check|look|search|verify|find)|checking now|one moment|give me a (sec|second|moment))\b[^.!?]*[.!…]*$/i;
+  return zh.test(t) || en.test(t);
+}
+
+function assistantText(message: AssistantMessage): string {
+  return message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 }
 
 function lastAssistant(messages: readonly AgentMessage[]): AssistantMessage | undefined {
