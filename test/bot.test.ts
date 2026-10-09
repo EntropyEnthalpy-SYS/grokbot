@@ -14,6 +14,7 @@ import { MemoryStore } from "../src/memory.ts";
 import { LimitStore, UsageStore } from "../src/usage.ts";
 import { PermissionStore } from "../src/permissions.ts";
 import { PollDesk } from "../src/agent/polls.ts";
+import { ActionDesk, confirmerFor, type Confirmer } from "../src/agent/actions.ts";
 
 const OWNER = 1000001;
 
@@ -34,34 +35,40 @@ function harness(
     /** Telegram refuses ephemeral messages (bot is not an admin). */
     refuseEphemeral?: boolean;
     /** The chat agent's turn: may call the create_image tool like Grok would. */
-    agent?: (images: ImageStudio, key: string, extra: { memory: MemoryStore; speakers: Map<string, { userId?: number; userName: string }> }) => Promise<string>;
+    agent?: (
+      images: ImageStudio,
+      key: string,
+      extra: { memory: MemoryStore; speakers: Map<string, { userId?: number; userName: string }>; polls: PollDesk; confirm: Confirmer },
+    ) => Promise<string>;
   } = {},
 ) {
   const calls: { method: string; payload: Record<string, unknown> }[] = [];
   const db = openDbAt(":memory:");
   const groups = new GroupStore(db);
-  const reminders = new ReminderStore(db);
+  const reminders = new ReminderStore(db, (chatId) => groups.timeZone(chatId));
   const memory = new MemoryStore(db);
   const usage = new UsageStore(db);
   const limits = new LimitStore(db);
   const permissions = new PermissionStore(db);
   const polls = new PollDesk();
+  const actions = new ActionDesk();
   const speakers = new Map<string, { userId?: number; userName: string }>();
   const created: { prompt: string; sources: number }[] = [];
   const images = new ImageStudio(async ({ prompt, sources }) => {
     created.push({ prompt, sources: sources?.length ?? 0 });
     return Buffer.from(`jpeg:${prompt}`);
   });
-  const runs: { key: string; ephemeral?: boolean }[] = [];
+  const runs: { key: string; ephemeral?: boolean; text: string; images: number }[] = [];
   const sessions = {
     forgetChat: () => 0,
     reset: () => undefined,
     abort: () => false,
     abortChat: () => 0,
-    run: async (key: string, _input: unknown, handlers: { onStart?: () => void }, turn: { ephemeral?: boolean } = {}) => {
-      runs.push({ key, ephemeral: turn.ephemeral });
+    run: async (key: string, input: { text: string; images?: unknown[] }, handlers: { onStart?: () => void }, turn: { ephemeral?: boolean } = {}) => {
+      runs.push({ key, ephemeral: turn.ephemeral, text: input.text, images: input.images?.length ?? 0 });
       handlers.onStart?.();
-      const text = options.agent ? await options.agent(images, key, { memory, speakers }) : "ok";
+      const confirm = confirmerFor({ actions, confirmActions: (chatId) => groups.confirmActions(chatId), speakers }, key);
+      const text = options.agent ? await options.agent(images, key, { memory, speakers, polls, confirm }) : "ok";
       return { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
     },
   };
@@ -90,6 +97,7 @@ function harness(
     limits,
     permissions,
     polls,
+    actions,
     apiRoot: "http://127.0.0.1:1", // "local Bot API": getFile returns a path on disk
     links: { cache: { get: () => undefined }, video: {} } as never,
   });
@@ -136,7 +144,13 @@ function harness(
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   };
-  return { bot, calls, runs, until, groups, reminders, memory, speakers, usage, limits, permissions, polls, asked, created, images, groupText, settle, next: () => ++updateId };
+  /** Someone taps an inline button under message 1 in the group (or in their private chat with `chat`). */
+  const press = (from: number, data: string, chat: { id: number; type: string } = { id: GROUP, type: "supergroup" }): Update =>
+    ({
+      update_id: ++updateId,
+      callback_query: { id: String(updateId), from: { id: from, is_bot: false, first_name: `user${from}` }, chat_instance: "c", data, message: { message_id: 1, date: 0, chat } },
+    }) as Update;
+  return { bot, calls, runs, until, press, actions, groups, reminders, memory, speakers, usage, limits, permissions, polls, asked, created, images, groupText, settle, next: () => ++updateId };
 }
 
 test("inline queries reach their handler (they have no chat, unlike every other update)", async () => {
@@ -225,7 +239,10 @@ test("“grok, 提醒我們…” stores a reminder in Taipei time instead of as
   assert.equal(reminder?.repeat, "weekly");
   assert.equal(reminder?.dueAt, Date.parse(`${day}T12:00:00Z`)); // 20:00 in Taipei is 12:00 UTC
   assert.equal(reminder?.userId, 5);
-  assert.ok(h.calls.some((c) => c.method === "sendMessage" && String(c.payload.text).includes("/unremind")));
+  const confirmation = h.calls.find((c) => c.method === "sendMessage" && String(c.payload.text).includes(`/remind edit ${reminder!.id}`));
+  assert.ok(confirmation, "the confirmation shows the time understood and how to correct it");
+  assert.match(String(confirmation.payload.text), /\(Taipei, in \d+ days?\)/);
+  assert.deepEqual(JSON.stringify(confirmation.payload.reply_markup).match(/rem:\w:\d+/g), [`rem:p:${reminder!.id}`, `rem:x:${reminder!.id}`]);
 });
 
 test("only the person who set a reminder, or the owner, can cancel it", async () => {
@@ -637,4 +654,140 @@ test("/help: members get how-to-talk + their commands; the owner in private is p
   assert.match(sentTo(h, GROUP).at(-1)!, /Talking to the bot[\s\S]*Commands for everyone/);
   await h.bot.handleUpdate(privateUpdate(h, OWNER, "/help"));
   assert.match(sentTo(h, OWNER).at(-1)!, /\/admin<\/code> → 📖 <b>Guide/);
+});
+
+import { docx } from "./fixtures.ts";
+
+test("reminder buttons: only whoever set it (or the owner) can snooze, pause or cancel; the buttons then show what happened", async () => {
+  const h = harness();
+  h.groups.enable(GROUP, "Grok bot test");
+  const id = h.reminders.add({ chatId: GROUP, threadId: 0, messageId: 1, userId: 5, userName: "A", text: "call", dueAt: Date.now() - 1000, repeat: "none" });
+  h.reminders.delivered(h.reminders.get(GROUP, id)!);
+  await h.bot.handleUpdate(h.press(6, `rem:s:${id}:10`));
+  assert.equal(h.reminders.count(GROUP), 0, "someone else can't snooze it");
+  assert.match(JSON.stringify(h.calls.at(-1)!.payload), /Only the person who set it/);
+
+  const before = Date.now();
+  await h.bot.handleUpdate(h.press(5, `rem:s:${id}:10`));
+  const snoozed = h.reminders.list(GROUP)[0]!;
+  assert.ok(snoozed.dueAt >= before + 10 * 60_000 && snoozed.dueAt <= Date.now() + 10 * 60_000);
+  const edit = h.calls.find((c) => c.method === "editMessageReplyMarkup")!;
+  assert.match(JSON.stringify(edit.payload), /💤 Snoozed to .* by user5/);
+
+  await h.bot.handleUpdate(h.press(OWNER, `rem:p:${id}`));
+  assert.equal(h.reminders.list(GROUP)[0]!.paused, true, "the owner may pause anyone's");
+  await h.bot.handleUpdate(h.press(5, `rem:x:${id}`));
+  assert.equal(h.reminders.get(GROUP, id), undefined);
+});
+
+test("/remind edit gives the AI the current reminder and applies the complete change; others can't edit it", async () => {
+  const day = new Date(Date.now() + 3 * 24 * 3600_000).toISOString().slice(0, 10);
+  const h = harness({ loggedIn: true, ask: () => `{"at":"${day} 21:00","repeat":"none","text":"開會"}` });
+  h.groups.enable(GROUP, "Grok bot test");
+  const id = h.reminders.add({ chatId: GROUP, threadId: 0, messageId: 1, userId: 5, userName: "A", text: "開會", dueAt: Date.parse(`${day}T12:00:00Z`), repeat: "weekly" });
+  await h.bot.handleUpdate(h.groupText(6, `/remind edit ${id} 改到9點`));
+  await h.settle();
+  assert.equal(h.asked.length, 0);
+  await h.bot.handleUpdate(h.groupText(5, `/remind edit ${id} 改到9點，只要這次`));
+  await h.settle();
+  assert.match(h.asked[0]!.system, new RegExp(`CHANGES this existing reminder: \\{"at":"${day} 20:00","repeat":"weekly","text":"開會"\\}`));
+  assert.equal(h.asked[0]!.prompt, "改到9點，只要這次");
+  const [changed] = h.reminders.list(GROUP);
+  assert.deepEqual([changed?.id, changed?.dueAt, changed?.repeat], [id, Date.parse(`${day}T13:00:00Z`), "none"]);
+  assert.ok(h.calls.some((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("✏️ Changed")));
+});
+
+test("/tz: anyone can see it, only the owner changes it in a group; reminders there use it", async () => {
+  const day = new Date(Date.now() + 2 * 24 * 3600_000).toISOString().slice(0, 10);
+  const h = harness({ loggedIn: true, ask: () => `{"at":"${day} 20:00","repeat":"none","text":"call"}` });
+  h.groups.enable(GROUP, "Grok bot test");
+  await h.bot.handleUpdate(h.groupText(5, "/tz tokyo"));
+  assert.equal(h.groups.timeZone(GROUP), "Asia/Taipei");
+  await h.bot.handleUpdate(h.groupText(OWNER, "/tz tokyo"));
+  assert.equal(h.groups.timeZone(GROUP), "Asia/Tokyo", "a city name is enough");
+  await h.bot.handleUpdate(h.groupText(OWNER, "/tz Mars/Olympus"));
+  assert.match(String(h.calls.at(-1)!.payload.text), /don't know the time zone/);
+  await h.bot.handleUpdate(h.groupText(5, "/remind tomorrow 20:00 call"));
+  await h.settle();
+  assert.equal(h.reminders.list(GROUP)[0]!.dueAt, Date.parse(`${day}T11:00:00Z`), "20:00 in Tokyo is 11:00 UTC");
+  assert.match(h.asked[0]!.system, /\(Asia\/Tokyo\)/);
+  await h.bot.handleUpdate(h.groupText(OWNER, "/tz default"));
+  assert.equal(h.groups.timeZone(GROUP), "Asia/Taipei");
+});
+
+test("a document sent privately is read and summarized; /tr on a document translates its text", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "doc-"));
+  const path = (name: string) => {
+    const p = join(dir, name);
+    writeFileSync(p, docx(["Budget 2027", "Hiring freeze until March"]));
+    return p;
+  };
+  const h = harness({ loggedIn: true, ask: () => "預算 2027", files: { d1: path("a.docx"), d2: path("b.docx") } });
+  const document = (id: string, extra: Record<string, unknown> = {}) =>
+    privateUpdate(h, OWNER, "", { text: undefined, document: { file_id: id, file_unique_id: id, file_name: "plan.docx", mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }, ...extra });
+  await h.bot.handleUpdate(document("d1"));
+  await h.until(() => h.runs.length > 0);
+  const input = h.runs[0]!.text;
+  assert.match(input, /^Summarize this document/);
+  assert.match(input, /<external_content url="document: plan\.docx">[\s\S]*"plan\.docx" \(Word document\)\n\nBudget 2027\nHiring freeze until March[\s\S]*<\/external_content>/);
+  assert.equal(existsSync(join(dir, "a.docx")), false, "the downloaded file is deleted once read");
+
+  const sent = { message_id: 77, date: 0, chat: { id: OWNER, type: "private" }, from: { id: OWNER, is_bot: false, first_name: "O" }, document: { file_id: "d2", file_unique_id: "d2", file_name: "plan.docx" } };
+  await h.bot.handleUpdate(privateUpdate(h, OWNER, "/tr", { reply_to_message: sent }));
+  await h.until(() => h.asked.length > 0);
+  assert.equal(h.asked[0]!.prompt, "Budget 2027\nHiring freeze until March");
+
+  await h.bot.handleUpdate(privateUpdate(h, OWNER, "", { text: undefined, document: { file_id: "x", file_unique_id: "x", file_name: "setup.exe" } }));
+  assert.match(String(h.calls.at(-1)!.payload.text), /I can read PDF, Word/);
+});
+
+test("with ✋ confirmations on, the AI's note waits for the asker's ✅: others can't confirm, a second tap does nothing", async () => {
+  const h = harness({
+    loggedIn: true,
+    agent: async (_images, key, { memory, speakers, confirm }) => {
+      const result = await memory.tool(GROUP, () => speakers.get(key), confirm).execute("c1", { note: "小美對花生過敏" });
+      assert.match(String((result.content[0] as { text: string }).text), /Not saved yet/);
+      return "請按 ✅";
+    },
+  });
+  h.groups.enable(GROUP, "Grok bot test");
+  assert.equal(h.groups.confirmActions(GROUP), true, "on by default in groups");
+  await h.bot.handleUpdate(h.groupText(7, "grok, 記住小美對花生過敏"));
+  await h.settle();
+  assert.deepEqual(h.memory.list(GROUP), [], "nothing saved before the tap");
+  const preview = h.calls.find((c) => c.method === "sendMessage" && String(c.payload.text).includes("Save this note?"))!;
+  assert.match(String(preview.payload.text), /小美對花生過敏[\s\S]*user7 or the bot owner can confirm/);
+  const ok = JSON.stringify(preview.payload.reply_markup).match(/act:ok:[\w-]+/)![0];
+
+  await h.bot.handleUpdate(h.press(8, ok));
+  assert.deepEqual(h.memory.list(GROUP), []);
+  await h.bot.handleUpdate(h.press(7, ok));
+  await h.bot.handleUpdate(h.press(7, ok));
+  assert.deepEqual(h.memory.list(GROUP).map((f) => [f.text, f.userId]), [["小美對花生過敏", 7]], "saved once, under the asker");
+  const edits = h.calls.filter((c) => c.method === "editMessageText");
+  assert.equal(edits.length, 1, "the second tap runs nothing");
+  assert.match(String(edits[0]!.payload.text), /Saved as note #\d+[\s\S]*confirmed by user7/);
+});
+
+test("a suggested poll can be discarded; with confirmations off it is posted at once", async () => {
+  const h = harness({
+    loggedIn: true,
+    agent: async (_images, key, { polls, confirm }) => {
+      await polls.tool(key, confirm).execute("c1", { question: "晚餐?", options: ["拉麵", "火鍋"] });
+      return "ok";
+    },
+  });
+  h.groups.enable(GROUP, "Grok bot test");
+  await h.bot.handleUpdate(h.groupText(7, "grok, 開個投票 晚餐 拉麵/火鍋"));
+  await h.settle();
+  const preview = h.calls.find((c) => String(c.payload.text ?? "").includes("Post this poll?"))!;
+  assert.match(String(preview.payload.text), /晚餐\?\n• 拉麵\n• 火鍋/);
+  await h.bot.handleUpdate(h.press(OWNER, JSON.stringify(preview.payload.reply_markup).match(/act:no:[\w-]+/)![0]));
+  assert.equal(h.calls.filter((c) => c.method === "sendPoll").length, 0);
+  assert.match(String(h.calls.find((c) => c.method === "editMessageText")!.payload.text), /Discarded by user1000001/);
+
+  h.groups.setConfirmActions(GROUP, false);
+  await h.bot.handleUpdate(h.groupText(7, "grok, 再開一個"));
+  await h.settle();
+  assert.equal(h.calls.filter((c) => c.method === "sendPoll").length, 1);
 });

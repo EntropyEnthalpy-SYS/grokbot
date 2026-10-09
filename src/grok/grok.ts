@@ -7,6 +7,7 @@ import {
   type AssistantMessageEventStream,
   type CredentialStore,
   type ImageContent,
+  type Message,
   type Model,
   type MutableModels,
   type SimpleStreamOptions,
@@ -17,6 +18,7 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { randomUUID } from "node:crypto";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { getSetting, setSetting, type Db } from "../db.ts";
+import { SEARCH_TOOL_NAME } from "../links/search.ts";
 
 const PROVIDER = "xai";
 
@@ -84,6 +86,10 @@ export interface ProbeResult {
   detail: string;
   usedSearch?: boolean;
 }
+
+/** Told to ChatGPT/Claude when they have no web search (no Tavily key, or /search off): don't guess current facts. */
+export const NO_SEARCH_NOTE =
+  "\n\nYou have no live web search right now. For current information (news, weather, prices, schedules, recent events), say plainly that you can't look it up at the moment instead of guessing.";
 
 const IMAGE_MODEL = "grok-imagine-image-2.0";
 const STT_URL = "https://api.x.ai/v1/stt";
@@ -186,6 +192,11 @@ export class Grok {
   onUsage: (provider: ChatProvider, input: number, output: number) => void = () => undefined;
   /** Called when a provider failed and the next one in the chain takes over. */
   onFailover: (from: ChatProvider, to: ChatProvider, error: string) => void = () => undefined;
+  /**
+   * Web search for providers without built-in search (ChatGPT, Claude) in one-shot requests
+   * such as scheduled posts: returns results as text for the prompt. Unset = no search for them.
+   */
+  webSearch: ((query: string, signal?: AbortSignal) => Promise<string>) | undefined;
 
   #count(provider: ChatProvider, field: "answers" | "failovers", error?: string): void {
     const entry = this.stats.get(provider) ?? { answers: 0, failovers: 0 };
@@ -198,9 +209,13 @@ export class Grok {
     const stream =
       target.provider === "xai"
         ? withoutServerSideToolCalls(
-            this.models.streamSimple(target.model, context, this.#requestOptions(target.model, options, this.route, this.hostedSearch)),
+            this.models.streamSimple(
+              target.model,
+              searchToolsFor("xai", context, this.hostedSearch),
+              this.#requestOptions(target.model, options, this.route, this.hostedSearch),
+            ),
           )
-        : this.models.streamSimple(target.model, context, options);
+        : this.models.streamSimple(target.model, searchToolsFor(target.provider, context, this.hostedSearch), options);
     void stream.result().then(
       (message) => this.onUsage(target.provider, message.usage?.input ?? 0, message.usage?.output ?? 0),
       () => undefined,
@@ -363,14 +378,29 @@ export class Grok {
     const targets = await this.targets();
     if (targets.length === 0) throw new Error("Not logged in to any AI provider. Use /admin or /login.");
     let lastError = "";
+    // Searched once, the first time a provider without built-in search needs it.
+    let searched: Promise<string | undefined> | undefined;
     for (const [index, target] of targets.entries()) {
       const { provider, model } = target;
-      // Web/X search exists only on xAI; other providers answer from what they know.
-      const requestOptions =
-        provider === "xai"
-          ? this.#requestOptions(model, { signal: options.signal, reasoning: "low" }, this.route, options.search ?? false)
-          : { signal: options.signal, reasoning: "low" as const };
-      const reply = stripServerSideToolCalls(await this.models.completeSimple(model, context, requestOptions));
+      let requestContext = context;
+      let requestOptions: SimpleStreamOptions = { signal: options.signal, reasoning: "low" };
+      if (provider === "xai") {
+        // Grok searches the web and X itself (hosted tools).
+        requestOptions = this.#requestOptions(model, requestOptions, this.route, options.search ?? false);
+      } else if (options.search) {
+        // ChatGPT/Claude: search first and hand them the results.
+        searched ??= this.webSearch
+          ? this.webSearch(prompt, options.signal).catch((error: unknown) => {
+              console.warn(`web search for ${provider} failed: ${errorMessage(error)}`);
+              return undefined;
+            })
+          : Promise.resolve(undefined);
+        const results = await searched;
+        requestContext = results
+          ? { ...context, messages: [{ ...context.messages[0]!, content: withText(content, `\n\nWeb search results, fetched just now:\n${results}`) }] }
+          : { ...context, systemPrompt: system + NO_SEARCH_NOTE };
+      }
+      const reply = stripServerSideToolCalls(await this.models.completeSimple(model, requestContext, requestOptions));
       this.onUsage(provider, reply.usage?.input ?? 0, reply.usage?.output ?? 0);
       const text = assistantText(reply).trim();
       if (reply.stopReason !== "error" && reply.stopReason !== "aborted" && text) {
@@ -513,6 +543,43 @@ export class Grok {
       },
     };
   }
+}
+
+/**
+ * Which search a provider gets in a chat request. pi-ai carries the prompt and tool
+ * declarations in the transcript's system messages (toolsAdded / toolsRemoved).
+ * Grok uses its hosted web/X search, so our search_web tool is removed for it;
+ * ChatGPT/Claude keep search_web while search is on. A non-Grok provider that ends up
+ * without search is told not to guess current facts.
+ */
+export function searchToolsFor<C extends { messages: readonly Message[] }>(provider: ChatProvider, context: C, searchOn: boolean): C {
+  const drop = provider === "xai" || !searchOn;
+  let declared = false;
+  const messages = context.messages.map((message) => {
+    if (message.role !== "system") return message;
+    if (message.toolsAdded?.some((t) => t.name === SEARCH_TOOL_NAME)) declared = true;
+    if (message.toolsRemoved?.some((t) => t.name === SEARCH_TOOL_NAME)) declared = false;
+    if (!drop) return message;
+    const { toolsAdded, toolsRemoved, ...rest } = message;
+    const added = toolsAdded?.filter((t) => t.name !== SEARCH_TOOL_NAME);
+    const removed = toolsRemoved?.filter((t) => t.name !== SEARCH_TOOL_NAME);
+    return { ...rest, ...(added ? { toolsAdded: added } : {}), ...(removed ? { toolsRemoved: removed } : {}) };
+  });
+  const hasSearch = declared && !drop;
+  if (provider !== "xai" && !hasSearch) {
+    const first = messages[0];
+    if (first?.role === "system") {
+      const content = typeof first.content === "string" ? first.content + NO_SEARCH_NOTE : [...first.content, { type: "text" as const, text: NO_SEARCH_NOTE }];
+      messages[0] = { ...first, content };
+    }
+  }
+  return { ...context, messages };
+}
+
+/** Append text to a user message's content (a string, or text plus images). */
+function withText(content: string | ({ type: "text"; text: string } | ImageContent)[], extra: string): string | ({ type: "text"; text: string } | ImageContent)[] {
+  if (typeof content === "string") return content + extra;
+  return [...content, { type: "text", text: extra }];
 }
 
 /** Headers the subscription proxy expects (mirrors OpenClaw's extensions/xai/stream.ts). */

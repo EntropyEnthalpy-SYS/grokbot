@@ -1,6 +1,8 @@
 import { Type } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Db } from "./db.ts";
+import type { Confirmer } from "./agent/actions.ts";
+import { escapeHtml } from "./telegram/format.ts";
 
 /** Facts a chat asked the bot to always know ("小明吃素", "we're in Taipei"). */
 export const MAX_FACTS_PER_CHAT = 50;
@@ -38,13 +40,21 @@ export class MemoryStore {
     return (this.#db.prepare("SELECT * FROM group_memory WHERE chat_id = ? ORDER BY id").all(chatId) as Row[]).map(fromRow);
   }
 
+  /** Why a note can't be saved, or undefined when it can. */
+  check(chatId: number, text: string): string | undefined {
+    const clean = text.replace(/\s+/g, " ").trim();
+    if (!clean) return "nothing to remember";
+    if (clean.length > MAX_FACT_CHARS) return `too long (max ${MAX_FACT_CHARS} characters)`;
+    const existing = this.list(chatId);
+    if (existing.some((f) => f.text === clean)) return "already remembered";
+    if (existing.length >= MAX_FACTS_PER_CHAT) return `this chat already has ${MAX_FACTS_PER_CHAT} notes; delete some with /lm del <id>`;
+    return undefined;
+  }
+
   add(chatId: number, text: string, by: { userId?: number; userName: string }, now = Date.now()): AddResult {
     const clean = text.replace(/\s+/g, " ").trim();
-    if (!clean) return { ok: false, reason: "nothing to remember" };
-    if (clean.length > MAX_FACT_CHARS) return { ok: false, reason: `too long (max ${MAX_FACT_CHARS} characters)` };
-    const existing = this.list(chatId);
-    if (existing.some((f) => f.text === clean)) return { ok: false, reason: "already remembered" };
-    if (existing.length >= MAX_FACTS_PER_CHAT) return { ok: false, reason: `this chat already has ${MAX_FACTS_PER_CHAT} notes; delete some with /lm del <id>` };
+    const reason = this.check(chatId, clean);
+    if (reason) return { ok: false, reason };
     const result = this.#db
       .prepare("INSERT INTO group_memory (chat_id, text, user_id, user_name, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(chatId, clean, by.userId ?? null, by.userName, now);
@@ -77,7 +87,8 @@ export class MemoryStore {
   }
 
   /** Lets Grok save a note when someone says "grok, 記住…" / "remember that …". */
-  tool(chatId: number, who: () => { userId?: number; userName: string } | undefined): AgentTool<typeof RememberParams, undefined> {
+  /** `confirm`: in groups that want it, the note waits for the asker's ✅ instead of being saved right away. */
+  tool(chatId: number, who: () => { userId?: number; userName: string } | undefined, confirm?: Confirmer): AgentTool<typeof RememberParams, undefined> {
     return {
       name: "remember",
       label: "Saving note",
@@ -88,6 +99,22 @@ export class MemoryStore {
       execute: async (_id, { note }) => {
         const by = who();
         if (!by) return { content: [{ type: "text", text: "Notes can't be saved here." }], details: undefined, isError: true };
+        if (confirm?.required()) {
+          const reason = this.check(chatId, note);
+          if (reason) return { content: [{ type: "text", text: `Not saved: ${reason}.` }], details: undefined, isError: true };
+          await confirm.propose({
+            label: "✅ Save note",
+            preview: `📝 <b>Save this note?</b>\n${escapeHtml(note.replace(/\s+/g, " ").trim())}`,
+            run: async () => {
+              const result = this.add(chatId, note, by);
+              return result.ok ? `📝 Saved as note #${result.fact.id} (/lm)` : `Not saved: ${result.reason}`;
+            },
+          });
+          return {
+            content: [{ type: "text", text: `Not saved yet: a preview with a ✅ Save button is shown, and ${by.userName} (or the bot owner) must tap it. Say so in one short sentence.` }],
+            details: undefined,
+          };
+        }
         const result = this.add(chatId, note, by);
         return result.ok
           ? { content: [{ type: "text", text: `Saved as note #${result.fact.id}. Confirm in one short sentence; they can see notes with /lm.` }], details: undefined }

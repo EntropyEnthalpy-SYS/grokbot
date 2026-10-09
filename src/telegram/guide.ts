@@ -16,19 +16,23 @@ In a group it stays quiet until addressed: <b>@mention</b> it, <b>reply</b> to o
 • <code>grok, 台北明天天氣？</code> → answer with web/X search
 • reply to a link: <code>grok, 重點是什麼？</code> → reads the link
 • reply to a photo/video: <code>grok, 這是哪裡？</code> → looks at it
+• reply to a PDF/Word/PowerPoint file: <code>grok, 總結</code> → reads it (in private chat, just send the file)
 • <code>grok, 畫一隻戴太空頭盔的柴犬</code> → creates an image
 • reply to a photo: <code>grok, 改成吉卜力風格</code> → edits it
 • <code>grok, 提醒我們週五晚上8點開會</code> → reminder
 • <code>grok, 記住小明吃素</code> → a note it always remembers
 • <code>grok, 開個投票：晚餐吃什麼 拉麵/火鍋/壽司</code> → a poll
+  In groups, notes and polls first appear as a preview: the person who asked taps ✅ (or ✖️).
 • a voice message starting with “grok, …” → answer in text and voice
 
 Automatic: posted links show what they contain (no comments), voice notes get a transcript.`;
 
 const EVERYONE = `<b>⌨️ Commands for everyone</b>
-• <code>/tr</code> (reply to text, voice or a photo) → translation; <code>/tr en 你好</code> for given text
+• <code>/tr</code> (reply to text, voice, a photo or a document) → translation; <code>/tr en 你好</code> for given text
 • <code>/img a cat astronaut</code> → image; as a reply to a photo it edits that photo
-• <code>/remind 明天9點 交報告</code> → reminder · <code>/reminders</code> lists · <code>/unremind 3</code> cancels
+• <code>/remind 明天9點 交報告</code> → reminder, confirmed with the time it understood · <code>/reminders</code> lists · <code>/unremind 3</code> cancels
+• <code>/remind edit 3 改到9點</code> · <code>/remind pause 3</code> · <code>/remind resume 3</code>; a due reminder has 💤 snooze buttons
+• <code>/tz</code> → this chat's time zone (owner changes it in groups: <code>/tz Europe/London</code>)
 • <code>/lm</code> notes: <code>/lm add 小明吃素</code> · <code>/lm del 2</code>
 • <code>/stats</code> → your usage and what's left of your limits
 • <code>/help</code> → this help
@@ -41,6 +45,7 @@ const OWNER_GROUP = `<b>👑 Owner commands in a group</b>
 • <code>/links auto</code> · <code>mention</code> · <code>off</code> → link cards always / when asked / never
 • <code>/platforms off douyin weibo</code> → cards off per platform (<code>/platforms</code> lists)
 • <code>/lang zh-tw</code> → zh-tw · zh-cn · en · ja · ko · off
+• <code>/tz Asia/Tokyo</code> · <code>/tz default</code> → time zone for reminders and the time the AI is told
 • <code>/voice auto</code> · <code>off</code> → automatic voice transcripts
 • <code>/tidy on</code> · <code>off</code> → setting replies disappear after 2 min
 • <code>/deletelink on</code> · <code>off</code> → remove link-only messages after their card (bot must be admin)
@@ -56,13 +61,13 @@ const OWNER_PRIVATE = `<b>🔑 Owner commands in private chat</b>
 • <code>/status</code> → logins, models, SuperGrok quota
 • <code>/health</code> → live check of the bot and its services
 • <code>/model grok-4.7</code> → switch the Grok model (<code>/model</code> lists)
-• <code>/search on</code> · <code>off</code> → web/X search
+• <code>/search on</code> · <code>off</code> → web search (Grok: its own web/X search; ChatGPT/Claude: Tavily)
 • <code>/route</code> → advanced; only if Grok returns 403
 • <code>/new</code> · <code>/stop</code> · <code>/forget</code> → also work for anyone in their own private chat`;
 
 const PANEL = `<b>🗂 The panel</b>
 • 🤖 <b>AI providers</b>: sign in to Grok / ChatGPT / Claude, order them, pick models
-• 👥 <b>Groups</b>: links · privacy · language · voice · tidy · who can use it · persona · voice replies
+• 👥 <b>Groups</b>: links · privacy · language · voice · tidy · who can use it · persona · voice replies · ✋ confirm notes/polls · 🕒 time zone
 • 📈 <b>Usage</b>: who used what (today / 7 / 30 days), tokens per provider
 • ⚖️ <b>Limits</b>: ➖/➕ per limit, ⭐ trusted members
 • 🔐 <b>Permissions</b>: per person 💬 private chat · ✅ approved · ⭐ trusted · ⛔ blocked; ➕ add people

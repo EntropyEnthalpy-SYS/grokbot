@@ -10,6 +10,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import type { Grok, Transcription } from "../grok/grok.ts";
 import { run } from "../media/run.ts";
 import { formatVideo, type VideoInfo, type VideoReader } from "../media/video.ts";
+import { DOCUMENT_MAX_BYTES, isReadableDocument, readDocument, type DocumentContent } from "../media/documents.ts";
 
 /** Telegram's hosted Bot API lets bots download files up to 20 MB; a local Bot API server allows 2000 MB. */
 export const CLOUD_DOWNLOAD_BYTES = 20 * 1024 * 1024;
@@ -29,6 +30,13 @@ type FileRef = { file_id: string; file_size?: number };
 
 export function voiceOf(message: Message): (FileRef & { duration: number }) | undefined {
   return message.voice ?? message.audio;
+}
+
+/** A document the bot can read (PDF, Word, PowerPoint, text…), or a picture sent as a file. */
+export function documentOf(message: Message): Message["document"] | undefined {
+  const doc = message.document;
+  if (!doc) return undefined;
+  return isReadableDocument(doc.file_name, doc.mime_type) || /^image\/(jpeg|png|webp)$/.test(doc.mime_type ?? "") ? doc : undefined;
 }
 
 export function videoOf(message: Message): (FileRef & { duration: number }) | undefined {
@@ -86,8 +94,30 @@ export class TelegramMedia {
     return { type: "image", data, mimeType: "image/jpeg" };
   }
 
-  /** Everything Grok needs to understand a message's media: photo, voice transcript, or watched video. */
+  /** A document's text (and scanned pages as images); a picture sent as a file is returned as an image. */
+  async document(message: Message): Promise<(DocumentContent & { name: string }) | undefined> {
+    const doc = documentOf(message);
+    if (!doc) return undefined;
+    const name = doc.file_name ?? "document";
+    if (doc.file_size !== undefined && doc.file_size > DOCUMENT_MAX_BYTES) {
+      throw new Error(`That document is larger than ${DOCUMENT_MAX_BYTES / 1024 / 1024} MB.`);
+    }
+    if (/^image\//.test(doc.mime_type ?? "")) {
+      const data = (await this.#withFile(doc, (path) => readFile(path))).toString("base64");
+      return { name, kind: "image file", text: "", images: [{ type: "image", data, mimeType: doc.mime_type! }], truncated: false };
+    }
+    // The file is deleted as soon as its text is read.
+    const content = await this.#withFile(doc, (path, dir) => readDocument(path, { fileName: doc.file_name, mimeType: doc.mime_type, workDir: dir }));
+    return { ...content, name };
+  }
+
+  /** Everything Grok needs to understand a message's media: photo, voice transcript, watched video, or document. */
   async content(message: Message): Promise<MediaContent | undefined> {
+    if (documentOf(message)) {
+      const doc = (await this.document(message))!;
+      const header = `Document "${doc.name}" (${doc.kind}${doc.truncated ? ", long: the middle is omitted" : ""})`;
+      return { text: doc.text ? `${header}:\n${doc.text}` : header, images: doc.images };
+    }
     if (message.photo) {
       const image = await this.photo(message);
       return image ? { text: "", images: [image] } : undefined;

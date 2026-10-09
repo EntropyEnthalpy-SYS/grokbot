@@ -175,7 +175,7 @@ test("backup copies everything except logins and API keys", () => {
 });
 
 test("scheduled posts are written at due time and stand alone; plain reminders still reply to the request", async () => {
-  const store = new ReminderStore(openDbAt(":memory:"));
+  const store = new ReminderStore(openDbAt(":memory:"), () => "Asia/Taipei");
   const now = Date.UTC(2026, 9, 9, 0, 0);
   store.add({ chatId: -1, threadId: 0, messageId: 11, userId: 5, userName: "A", text: "台北天氣", dueAt: now, repeat: "daily", ai: true });
   store.add({ chatId: -1, threadId: 0, messageId: 12, userId: 5, userName: "A", text: "開會", dueAt: now, repeat: "none" });

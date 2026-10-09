@@ -1,5 +1,7 @@
 import type { Db } from "../db.ts";
+import { getSetting, setSetting } from "../db.ts";
 import { defaultLanguage } from "../lang.ts";
+import { timeZone } from "../time.ts";
 import { extractLinks, type Entity } from "../links/detect.ts";
 
 export type LinkMode = "auto" | "mention" | "off";
@@ -191,6 +193,33 @@ export class GroupStore {
 
   setDeleteLink(chatId: number, on: boolean): void {
     this.#db.prepare("UPDATE groups SET delete_link = ? WHERE chat_id = ?").run(on ? 1 : 0, chatId);
+  }
+
+  /**
+   * The chat's time zone (/tz) for reminders and the time Grok is told; the bot's
+   * TIMEZONE unless set. Groups keep it with their settings; private chats in settings.
+   */
+  timeZone(chatId: number): string {
+    if (chatId > 0) return getSetting(this.#db, `tz.${chatId}`) || timeZone();
+    const row = this.#db.prepare("SELECT timezone FROM groups WHERE chat_id = ?").get(chatId) as { timezone: string } | undefined;
+    return row?.timezone || timeZone();
+  }
+
+  /** An IANA zone, or "" for the bot's default. */
+  setTimeZone(chatId: number, tz: string): void {
+    if (chatId > 0) setSetting(this.#db, `tz.${chatId}`, tz);
+    else this.#db.prepare("UPDATE groups SET timezone = ? WHERE chat_id = ?").run(tz, chatId);
+  }
+
+  /** Notes and polls the AI suggests in this group wait for the asker to tap ✅ (private chats: never). */
+  confirmActions(chatId: number): boolean {
+    if (chatId > 0) return false;
+    const row = this.#db.prepare("SELECT confirm_actions FROM groups WHERE chat_id = ?").get(chatId) as { confirm_actions: number } | undefined;
+    return row?.confirm_actions !== 0;
+  }
+
+  setConfirmActions(chatId: number, on: boolean): void {
+    this.#db.prepare("UPDATE groups SET confirm_actions = ? WHERE chat_id = ?").run(on ? 1 : 0, chatId);
   }
 
   /** Whether voice notes are transcribed automatically in this group. */

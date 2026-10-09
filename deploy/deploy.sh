@@ -31,6 +31,9 @@ chown root:grokbot /etc/grokbot.env && chmod 640 /etc/grokbot.env
 
 install -m 644 /opt/grokbot/deploy/grokbot.service /etc/systemd/system/grokbot.service
 
+# PDF text (pdftotext) and scanned pages (pdftoppm) for document summaries.
+command -v pdftotext >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq poppler-utils >/dev/null; }
+
 # yt-dlp in its own venv (with curl_cffi for browser impersonation), updated daily.
 if [ ! -x /opt/yt-dlp/bin/yt-dlp ]; then
   python3 -m venv /opt/yt-dlp

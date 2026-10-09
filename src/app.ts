@@ -3,6 +3,7 @@ import { readLinkTool, watchVideoTool } from "./agent/tools.ts";
 import { ImageStudio } from "./agent/images.ts";
 import { MemoryStore } from "./memory.ts";
 import { PollDesk } from "./agent/polls.ts";
+import { ActionDesk, confirmerFor } from "./agent/actions.ts";
 import { LimitStore } from "./usage.ts";
 import { openDb, type Db } from "./db.ts";
 import { SqliteCredentialStore } from "./grok/credentialStore.ts";
@@ -13,6 +14,7 @@ import { join } from "node:path";
 import { ParseHubClient, type PhDownload, type PhPost } from "./links/parsehub.ts";
 import { downloadBilibili } from "./media/bilibili.ts";
 import { LinkReader } from "./links/reader.ts";
+import { formatSearchResults, searchWebTool, WebSearch } from "./links/search.ts";
 import { VideoReader } from "./media/video.ts";
 import { installAuthRetry } from "./net/authRetry.ts";
 import { systemPromptFor, today } from "./prompt.ts";
@@ -43,6 +45,8 @@ export interface App {
   images: ImageStudio;
   memory: MemoryStore;
   polls: PollDesk;
+  /** AI-suggested notes and polls waiting for a person's ✅ (groups with confirmations on). */
+  actions: ActionDesk;
   limits: LimitStore;
   /** Who is asking in each running answer (set by the bot), for tools that record the author. */
   speakers: Map<string, { userId?: number; userName: string }>;
@@ -67,6 +71,9 @@ export function createApp(options: {
   const db = openDb(options.dataDir);
   const grok = new Grok({ db, credentials: new SqliteCredentialStore(db), defaultModel: options.defaultModel });
   const reader = new LinkReader({ db, tavilyKey: options.tavilyKey });
+  // ChatGPT and Claude have no built-in web search: they search with Tavily (Grok uses xAI's own).
+  const search = new WebSearch({ tavilyKey: options.tavilyKey });
+  if (search.available) grok.webSearch = async (query, signal) => formatSearchResults(query, await search.search(query, { signal }));
   const video = new VideoReader({
     db,
     transcribe: (audio, name, opts) => grok.transcribe(audio, name, opts),
@@ -79,6 +86,9 @@ export function createApp(options: {
   const polls = new PollDesk();
   const memory = new MemoryStore(db);
   const speakers = new Map<string, { userId?: number; userName: string }>();
+  const actions = new ActionDesk();
+  // Tools that change the chat (notes, polls) ask first in groups with ✋ confirmations on.
+  const confirmFor = (key: string) => confirmerFor({ actions, confirmActions: (chatId) => groups.confirmActions(chatId), speakers }, key);
   const parsehub = options.parsehubUrl
     ? new ParseHubClient({ baseUrl: options.parsehubUrl, mediaRoot: options.mediaDir ?? `${options.dataDir}/media` })
     : undefined;
@@ -91,12 +101,13 @@ export function createApp(options: {
       readLinkTool(reader, parsehub),
       watchVideoTool(video, () => preferredLanguage(groups, key), parsehub),
       images.tool(key),
-      memory.tool(chatIdOf(key), () => speakers.get(key)),
-      polls.tool(key),
+      memory.tool(chatIdOf(key), () => speakers.get(key), confirmFor(key)),
+      polls.tool(key, confirmFor(key)),
+      ...(search.available ? [searchWebTool(search)] : []),
     ],
-    systemExtra: (key) => `\n${today()}` + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key)),
+    systemExtra: (key) => `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key)),
   });
-  return { db, grok, sessions, groups, reader, video, parsehub, images, memory, speakers, polls, limits };
+  return { db, grok, sessions, groups, reader, video, parsehub, images, memory, speakers, polls, actions, limits };
 }
 
 /** The owner's style for a group, added to the system prompt of every request there. */

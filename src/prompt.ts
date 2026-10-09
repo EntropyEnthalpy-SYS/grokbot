@@ -11,8 +11,8 @@ const FORMAT_RULES = [
 ];
 
 /** Added to every request (not frozen into a long-lived conversation's system prompt). */
-export function today(now: Date = new Date()): string {
-  return `- Now: ${formatLocalTime(now.getTime())} (${timeZone()}).`;
+export function today(now: Date = new Date(), tz: string = timeZone()): string {
+  return `- Now: ${formatLocalTime(now.getTime(), tz)} (${tz}).`;
 }
 
 export function privatePrompt(now: Date = new Date()): string {

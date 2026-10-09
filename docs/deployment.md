@@ -1,6 +1,6 @@
 # Deploying on a server
 
-Tested on Debian 13 with systemd. You need root SSH access, Node 24, Python 3, `ffmpeg` and `curl` on the server.
+Tested on Debian 13 with systemd. You need root SSH access, Node 24, Python 3, `ffmpeg` and `curl` on the server (`deploy.sh` installs `poppler-utils` for PDFs if it is missing).
 
 ## 1. Install
 

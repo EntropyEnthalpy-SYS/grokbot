@@ -1,5 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { Confirmer } from "./actions.ts";
+import { escapeHtml } from "../telegram/format.ts";
 
 export interface PollRequest {
   question: string;
@@ -41,7 +43,8 @@ export function cleanPoll(input: { question: string; options: string[]; multiple
 export class PollDesk {
   poster: PollPoster | undefined;
 
-  tool(key: string): AgentTool<typeof PollParams, undefined> {
+  /** `confirm`: in groups that want it, the poll is shown as a preview and posted after the asker's ✅. */
+  tool(key: string, confirm?: Confirmer): AgentTool<typeof PollParams, undefined> {
     return {
       name: "create_poll",
       label: "Creating poll",
@@ -53,7 +56,20 @@ export class PollDesk {
         const { chatId, threadId } = chatOfKey(key);
         if (!this.poster || !Number.isFinite(chatId)) return { content: [{ type: "text", text: "Polls can't be posted here." }], details: undefined, isError: true };
         try {
-          await this.poster(chatId, threadId, cleanPoll(input));
+          const poll = cleanPoll(input);
+          const poster = this.poster;
+          if (confirm?.required()) {
+            await confirm.propose({
+              label: "✅ Post poll",
+              preview: `📊 <b>Post this poll?</b>\n${escapeHtml(poll.question)}\n${poll.options.map((o) => `• ${escapeHtml(o)}`).join("\n")}`,
+              run: async () => {
+                await poster(chatId, threadId, poll);
+                return "📊 Poll posted";
+              },
+            });
+            return { content: [{ type: "text", text: "Not posted yet: a preview with a ✅ Post button is shown for the person who asked. Say so in one short sentence." }], details: undefined };
+          }
+          await poster(chatId, threadId, poll);
           return { content: [{ type: "text", text: "Poll posted." }], details: undefined };
         } catch (error) {
           return { content: [{ type: "text", text: `Poll not posted: ${(error as Error).message}` }], details: undefined, isError: true };

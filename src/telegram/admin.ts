@@ -7,7 +7,7 @@ import { LIMITS, USAGE_KINDS, type LimitName, type LimitStore, type MemberUsage,
 import { CHAT_PROVIDER_IDS, CHAT_PROVIDERS, errorMessage, type AuthKind, type ChatProvider, type Grok } from "../grok/grok.ts";
 import { formatUptime, type HealthMonitor } from "../health.ts";
 import { formatLocalTime } from "../reminders.ts";
-import { zoneLabel } from "../time.ts";
+import { findTimeZone, formatLocalTime as formatInZone, timeZone, zoneLabel } from "../time.ts";
 import { escapeAttr, escapeHtml } from "./format.ts";
 import { GUIDE } from "./guide.ts";
 import { LANGUAGES, LINK_MODES, type GroupStore } from "./groups.ts";
@@ -228,6 +228,9 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
       case "gp":
         void askPersona(ctx, Number(a));
         return undefined;
+      case "gtz":
+        void askTimeZone(ctx, Number(a));
+        return undefined;
       case "perm":
         return people();
       case "pu":
@@ -434,6 +437,10 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
       .text(`🔐 Who can use: ${groups.access(chatId) === "approved" ? "approved only" : "everyone"}`, `adm:gs:${chatId}:access`)
       .row()
       .text(`🔊 Voice replies: ${on(groups.voiceReply(chatId))}`, `adm:gs:${chatId}:vr`)
+      .text(`✋ Confirm notes/polls: ${on(groups.confirmActions(chatId))}`, `adm:gs:${chatId}:confirm`)
+      .row()
+      .text(`🕒 Time zone: ${zoneLabel(groups.timeZone(chatId))}`, `adm:gtz:${chatId}`)
+      .row()
       .text(groups.persona(chatId) ? "🎭 Change persona" : "🎭 Set persona", `adm:gp:${chatId}`);
     if (groups.persona(chatId)) keyboard.text("🎭 Clear", `adm:gpc:${chatId}`);
     keyboard.row().text("⬅️ Groups", "adm:grp");
@@ -471,6 +478,8 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
         return groups.setVoiceReply(chatId, !groups.voiceReply(chatId));
       case "access":
         return groups.setAccess(chatId, groups.access(chatId) === "approved" ? "everyone" : "approved");
+      case "confirm":
+        return groups.setConfirmActions(chatId, !groups.confirmActions(chatId));
     }
   }
 
@@ -703,6 +712,22 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
     if (!text) return void (await ctx.reply("Persona unchanged."));
     groups.setPersona(chatId, text);
     await ctx.reply(`🎭 Persona for ${group.title} saved. It applies from the next question.`);
+  }
+
+  async function askTimeZone(ctx: Context, chatId: number): Promise<void> {
+    const group = groups.list().find((g) => g.chatId === chatId);
+    if (!group) return;
+    await ctx.reply(
+      `Send the time zone for <b>${escapeHtml(group.title)}</b> (now ${escapeHtml(groups.timeZone(chatId))}): an IANA name like <code>Europe/London</code>, a city like <code>Tokyo</code>, or <code>default</code> (${escapeHtml(timeZone())}).\n\n/cancel to keep it.`,
+      { parse_mode: "HTML" },
+    );
+    const text = await new Promise<string>((resolve) => (pendingInput = { resolve }));
+    if (!text) return void (await ctx.reply("Time zone unchanged."));
+    const reset = /^(default|reset)$/i.test(text);
+    const zone = reset ? timeZone() : findTimeZone(text);
+    if (!zone) return void (await ctx.reply(`I don't know the time zone "${text}". Tap 🕒 Time zone again to retry.`));
+    groups.setTimeZone(chatId, reset ? "" : zone);
+    await ctx.reply(`🕒 ${group.title}: ${zone}, now ${formatInZone(Date.now(), zone)}. New reminders use it.`);
   }
 
   async function status(): Promise<Screen> {

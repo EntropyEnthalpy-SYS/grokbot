@@ -1,6 +1,7 @@
 import { Bot, InputFile, type Context } from "grammy";
 import type { ImageStudio } from "../agent/images.ts";
 import type { PollDesk } from "../agent/polls.ts";
+import type { ActionDesk } from "../agent/actions.ts";
 import type { OpsClient } from "../ops.ts";
 import type { PermissionStore } from "../permissions.ts";
 import type { Db } from "../db.ts";
@@ -12,7 +13,7 @@ import { formatCounts } from "./admin.ts";
 import type { HealthMonitor } from "../health.ts";
 import { installAdmin, renderHealth } from "./admin.ts";
 import { MEMBER_HELP, OWNER_HELP } from "./guide.ts";
-import { timeZone, zoneLabel } from "../time.ts";
+import { addLocalDays, findTimeZone, formatFromNow, formatLocalTime as formatInZone, timeZone, zoneLabel } from "../time.ts";
 import { InputFile as VoiceFile } from "grammy";
 import { MAX_FACTS_PER_CHAT, type MemoryStore } from "../memory.ts";
 import type { Message } from "grammy/types";
@@ -30,7 +31,7 @@ import { sendVideoLinkCard } from "../links/videocard.ts";
 import type { CardCache } from "../links/cardCache.ts";
 import { inlineResults, urlFromQuery } from "./inline.ts";
 import { defaultLanguage } from "../lang.ts";
-import { AUTO_VOICE_MAX_SECONDS, TelegramMedia, videoOf, voiceOf } from "./media.ts";
+import { AUTO_VOICE_MAX_SECONDS, documentOf, TelegramMedia, videoOf, voiceOf } from "./media.ts";
 import { buildXCard, needsTranslation, sendXCard } from "../links/xcard.ts";
 import { fetchXPost } from "../links/xpost.ts";
 import { escapeHtml } from "./format.ts";
@@ -55,11 +56,11 @@ import { ReplyStreamer } from "./streamer.ts";
 import { RateLimiter } from "./rateLimit.ts";
 import { Semaphore } from "../media/run.ts";
 import {
-  formatLocalTime,
   isReminderRequest,
   MAX_REMINDERS_PER_CHAT,
   parseReminderAnswer,
   REMINDER_SYSTEM_PROMPT,
+  type Reminder,
   type ReminderStore,
 } from "../reminders.ts";
 
@@ -72,8 +73,9 @@ export const COMMANDS = [
   { command: "stats", description: "Your usage and what's left of your limits" },
   { command: "schedule", description: "Daily/weekly post written by the bot (owner/trusted)" },
   { command: "lm", description: "Notes I always remember: /lm, /lm add …, /lm del <id>" },
-  { command: "remind", description: "Set a reminder: /remind Friday 20:00 meeting" },
+  { command: "remind", description: "Set a reminder: /remind Friday 20:00 meeting (edit · pause · resume)" },
   { command: "reminders", description: "List reminders in this chat" },
+  { command: "tz", description: "This chat's time zone: /tz Europe/London" },
   { command: "unremind", description: "Cancel a reminder: /unremind <id>" },
   { command: "status", description: "Login, model and SuperGrok quota" },
   { command: "health", description: "Live check of the bot and its services (owner)" },
@@ -126,6 +128,8 @@ export interface BotDeps {
   /** Site cookies the owner sets in /admin for the ParseHub helper. */
   cookies?: CookieStore;
   polls?: PollDesk;
+  /** AI-suggested notes and polls waiting for a ✅ (groups with confirmations on). */
+  actions?: ActionDesk;
   ops?: OpsClient;
   /** A database copy without logins, for /admin → Maintenance → Backup. */
   backup?: () => string;
@@ -168,7 +172,7 @@ type ChatTarget = {
 /** Commands whose replies only the sender sees in groups (Telegram ephemeral commands, Bot API 10.2). */
 const EPHEMERAL_COMMANDS = new Set([
   "help", "start", "stats", "status", "health", "links", "lang", "voice", "platforms", "privacy", "deletelink",
-  "tidy", "lm", "reminders", "unremind", "new", "stop", "forget", "admin",
+  "tidy", "lm", "reminders", "unremind", "new", "stop", "forget", "admin", "tz",
 ]);
 
 export function createBot({
@@ -187,6 +191,7 @@ export function createBot({
   db,
   cookies,
   polls,
+  actions,
   ops,
   backup,
   health,
@@ -226,6 +231,45 @@ export function createBot({
     };
   }
   const isGroup = (ctx: Context) => ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
+
+  // A note or poll the AI suggested in a group with ✋ confirmations on: a preview with ✅ / ✖️ buttons.
+  if (actions) {
+    actions.presenter = async (action) => {
+      const who = action.userId ? `${escapeHtml(action.userName)} or the bot owner` : "the bot owner";
+      await bot.api.sendMessage(action.chatId, `${action.preview}\n<i>Suggested by the AI; ${who} can confirm.</i>`, {
+        parse_mode: "HTML",
+        ...(action.threadId ? { message_thread_id: action.threadId } : {}),
+        reply_markup: { inline_keyboard: [[{ text: action.label, callback_data: `act:ok:${action.id}` }, { text: "✖️ Discard", callback_data: `act:no:${action.id}` }]] },
+      });
+    };
+    bot.callbackQuery(/^act:(ok|no):([\w-]+)$/, async (ctx) => {
+      const [, choice, id] = ctx.match as RegExpMatchArray;
+      const action = actions.get(id!);
+      const finish = (text: string) =>
+        ctx.editMessageText(text, { parse_mode: "HTML" }).catch((error) => console.warn(`confirmation edit failed: ${errorMessage(error)}`));
+      if (!action || action.chatId !== ctx.chat?.id) {
+        await ctx.answerCallbackQuery({ text: "This suggestion expired." });
+        return ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => undefined);
+      }
+      if (!isOwner(ctx) && ctx.from.id !== action.userId) {
+        return ctx.answerCallbackQuery({ text: `Only ${action.userName} or the bot owner can decide this.`, show_alert: true });
+      }
+      if (!actions.take(id!)) return ctx.answerCallbackQuery();
+      const by = escapeHtml(displayName(ctx.from));
+      if (choice === "no") {
+        await ctx.answerCallbackQuery({ text: "Discarded." });
+        return finish(`${action.preview}\n<i>✖️ Discarded by ${by}.</i>`);
+      }
+      try {
+        const result = await action.run();
+        await ctx.answerCallbackQuery({ text: result.slice(0, 200) });
+        await finish(`${action.preview}\n<i>${escapeHtml(result)} · confirmed by ${by}</i>`);
+      } catch (error) {
+        await ctx.answerCallbackQuery({ text: `⚠️ ${errorMessage(error)}`.slice(0, 200), show_alert: true });
+        await finish(`${action.preview}\n<i>⚠️ Failed: ${escapeHtml(errorMessage(error))}</i>`);
+      }
+    });
+  }
 
   // Only the owner may add the bot to groups or channels: if anyone else does, it leaves right away.
   bot.on("my_chat_member", async (ctx) => {
@@ -820,14 +864,90 @@ export function createBot({
     const request = ctx.match.trim();
     if (!request) {
       return ctx.reply(
-        "Examples:\n/remind tomorrow 9:00 call the bank\n/remind 週五晚上8點 開會\n/remind every Monday 10:00 weekly report\n/remind in 30 minutes check the oven\n\nOr just say: grok, 提醒我們明天下午3點交報告",
+        "Examples:\n/remind tomorrow 9:00 call the bank\n/remind 週五晚上8點 開會\n/remind every Monday 10:00 weekly report\n/remind in 30 minutes check the oven\n\n" +
+          "Change one: /remind edit 3 改到9點 · /remind pause 3 · /remind resume 3 (ids in /reminders)\n\nOr just say: grok, 提醒我們明天下午3點交報告",
       );
+    }
+    // "/remind edit 3 …", "/remind pause 3", "/remind resume 3"
+    const manage = request.match(/^(edit|pause|resume)\s+#?(\d+)(?:\s+([\s\S]+))?$/i);
+    if (manage) {
+      const action = manage[1]!.toLowerCase();
+      const reminder = reminders.get(ctx.chat.id, Number(manage[2]));
+      if (!reminder || !reminders.isActive(reminder.id)) return ctx.reply("No such reminder here. See /reminders for the ids.");
+      if (!mayManage(ctx, reminder)) return ctx.reply("Only the person who set it (or the bot owner) can change it.");
+      if (action !== "edit") {
+        const updated = reminders.setPaused(reminder, action === "pause");
+        return ctx.reply(updated.paused ? `⏸ Paused: ${updated.text}` : `▶️ Resumed: ${updated.text}, next ${formatInZone(updated.dueAt, reminders.zone(ctx.chat.id))}`);
+      }
+      if (!manage[3]) return ctx.reply(`What should change? e.g. /remind edit ${reminder.id} 改到明天早上9點`);
+      if (!mayAsk(ctx, ctx.chat.id)) return refuseOverLimit(ctx, message, threadIdOf(message));
+      background(ctx, async () => {
+        const failure = await createReminder(ctx, message, manage[3]!, reminder.ai, reminder);
+        if (failure) await ctx.reply(`⏰ I couldn't change that: ${failure}.`);
+      });
+      return;
     }
     if (!mayAsk(ctx, ctx.chat.id)) return refuseOverLimit(ctx, message, threadIdOf(message));
     background(ctx, async () => {
       const failure = await createReminder(ctx, message, request);
       if (failure) await ctx.reply(`⏰ I couldn't set that: ${failure}. Try e.g. /remind Friday 20:00 meeting`);
     });
+  });
+
+  /** Who may change, pause, snooze or cancel a reminder: whoever set it, and the owner. */
+  function mayManage(ctx: Context, reminder: Reminder): boolean {
+    return isOwner(ctx) || (ctx.from !== undefined && reminder.userId === ctx.from.id);
+  }
+
+  // Buttons under reminder confirmations and delivered reminders: rem:<action>:<id>[:<arg>]
+  bot.callbackQuery(/^rem:(p|r|x|s):(\d+)(?::(\w+))?$/, async (ctx) => {
+    const [, action, idText, arg] = ctx.match as RegExpMatchArray;
+    const chatId = ctx.chat?.id;
+    const reminder = chatId === undefined ? undefined : reminders.get(chatId, Number(idText));
+    if (!reminder) return ctx.answerCallbackQuery({ text: "That reminder no longer exists." });
+    if (!mayManage(ctx, reminder)) return ctx.answerCallbackQuery({ text: "Only the person who set it (or the bot owner) can change it.", show_alert: true });
+    const zone = reminders.zone(reminder.chatId);
+    const by = displayName(ctx.from);
+    let note: string;
+    if (action === "x") {
+      reminders.remove(reminder.id);
+      note = `🗑 Cancelled by ${by}`;
+    } else if (action === "p" || action === "r") {
+      if (!reminders.isActive(reminder.id)) return ctx.answerCallbackQuery({ text: "That reminder was already delivered." });
+      const updated = reminders.setPaused(reminder, action === "p");
+      note = updated.paused ? `⏸ Paused by ${by} · /remind resume ${reminder.id}` : `▶️ Resumed · next ${formatInZone(updated.dueAt, zone)}`;
+    } else {
+      const now = Date.now();
+      const until = arg === "tm" ? addLocalDays(now, 1, zone) : now + Math.min(Number(arg) || 10, 24 * 60) * 60_000;
+      reminders.snooze(reminder, until, now);
+      note = `💤 Snoozed to ${formatInZone(until, zone)} by ${by}`;
+    }
+    await ctx.answerCallbackQuery({ text: note.slice(0, 200) });
+    // The buttons are replaced by what happened, so everyone in the chat sees it.
+    await ctx
+      .editMessageReplyMarkup({ reply_markup: { inline_keyboard: [[{ text: note.slice(0, 60), callback_data: "rem:done" }]] } })
+      .catch(() => undefined);
+  });
+  bot.callbackQuery("rem:done", (ctx) => ctx.answerCallbackQuery());
+
+  bot.command("tz", (ctx) => {
+    const chatId = ctx.chat.id;
+    const arg = ctx.match.trim();
+    const current = groups.timeZone(chatId);
+    if (!arg) {
+      return ctx.reply(
+        `🕒 Time zone here: <b>${escapeHtml(current)}</b>, now ${escapeHtml(formatInZone(Date.now(), current))}.\nReminders and the time I'm told use it.\nChange: <code>/tz Europe/London</code> · <code>/tz Tokyo</code> · <code>/tz default</code> (${escapeHtml(timeZone())})`,
+        { parse_mode: "HTML" },
+      );
+    }
+    if (isGroup(ctx) && !isOwner(ctx)) return ctx.reply("Only the bot owner can change this.");
+    const wanted = /^(default|reset)$/i.test(arg) ? timeZone() : findTimeZone(arg);
+    if (!wanted) return ctx.reply(`I don't know the time zone "${arg}". Use a name like Asia/Taipei, Europe/London or America/New_York, or a city like Tokyo.`);
+    groups.setTimeZone(chatId, /^(default|reset)$/i.test(arg) ? "" : wanted);
+    return ctx.reply(
+      `🕒 Time zone set to <b>${escapeHtml(wanted)}</b> (now ${escapeHtml(formatInZone(Date.now(), wanted))}). Existing reminders keep their moment in time; new ones use this zone.`,
+      { parse_mode: "HTML" },
+    );
   });
 
   bot.command("stats", (ctx) => {
@@ -864,13 +984,14 @@ export function createBot({
   bot.command("reminders", (ctx) => {
     const list = reminders.list(ctx.chat.id);
     if (list.length === 0) return ctx.reply("No reminders here. Set one with /remind Friday 20:00 meeting");
-    const lines = list.map(
-      (r) =>
-        `${r.ai ? "🗓 " : ""}<code>${r.id}</code> · ${formatLocalTime(r.dueAt)}${r.repeat === "none" ? "" : ` (${repeatLabel(r.repeat)})`} · ${escapeHtml(r.text)} <i>— ${escapeHtml(r.userName)}</i>`,
+    const zone = reminders.zone(ctx.chat.id);
+    const lines = list.map((r) => reminderLine(r, zone));
+    const id = list[0]!.id;
+    return ctx.reply(
+      `⏰ Reminders and 🗓 scheduled posts (${escapeHtml(zoneLabel(zone))} time):\n${lines.join("\n")}\n\n` +
+        `Change: <code>/remind edit ${id} …</code> · <code>/remind pause ${id}</code> · <code>/remind resume ${id}</code> · cancel: <code>/unremind ${id}</code>`,
+      { parse_mode: "HTML" },
     );
-    return ctx.reply(`⏰ Reminders and 🗓 scheduled posts (${zoneLabel()} time):\n${lines.join("\n")}\n\nCancel one: <code>/unremind ${list[0]!.id}</code>`, {
-      parse_mode: "HTML",
-    });
   });
 
   bot.command("unremind", (ctx) => {
@@ -926,7 +1047,17 @@ export function createBot({
         await chat(ctx, { text: `${question}\n\n${untrusted("telegram-video", content?.text ?? "")}`, images: content?.images }, { key });
       });
     }
-    return ctx.reply("I can read text, links, photos, voice messages and videos.");
+    if (message.document) {
+      if (!documentOf(message)) return ctx.reply("I can read PDF, Word (.docx), PowerPoint (.pptx), OpenDocument and text files.");
+      return background(ctx, async () => {
+        const typing = keepTyping(ctx);
+        const doc = await media.document(message).finally(() => typing.stop());
+        if (!doc) return;
+        const question = message.caption || (doc.text ? DOCUMENT_SUMMARY_REQUEST : "What's in this image?");
+        await chat(ctx, { text: `${question}\n\n${untrusted(`document: ${doc.name}`, documentPrompt(doc))}`, images: doc.images }, { key });
+      });
+    }
+    return ctx.reply("I can read text, links, photos, voice messages, videos and documents (PDF, Word, PowerPoint, text).");
   });
 
   function onGroupMessage(ctx: Context, message: Message): void {
@@ -1174,32 +1305,47 @@ export function createBot({
     }
   }
 
-  /** Parse a reminder request with Grok and store it. Returns why it failed, or undefined when it was set. */
-  async function createReminder(ctx: Context, message: Message, request: string, ai = false): Promise<string | undefined> {
+  /**
+   * Parse a reminder request with Grok and store it, or apply a change to `existing` (/remind edit).
+   * Confirms the time as understood, with Pause/Cancel buttons. Returns why it failed, or undefined.
+   */
+  async function createReminder(ctx: Context, message: Message, request: string, ai = false, existing?: Reminder): Promise<string | undefined> {
     const chatId = ctx.chat!.id;
     if (!(await grok.isLoggedIn())) return "the bot owner needs to log in to Grok first";
-    if (reminders.count(chatId) >= MAX_REMINDERS_PER_CHAT) return `this chat already has ${MAX_REMINDERS_PER_CHAT} reminders (see /reminders)`;
-    if (ai && reminders.list(chatId).filter((r) => r.ai).length >= MAX_SCHEDULED_POSTS) return `this chat already has ${MAX_SCHEDULED_POSTS} scheduled posts`;
+    if (!existing) {
+      if (reminders.count(chatId) >= MAX_REMINDERS_PER_CHAT) return `this chat already has ${MAX_REMINDERS_PER_CHAT} reminders (see /reminders)`;
+      if (ai && reminders.list(chatId).filter((r) => r.ai).length >= MAX_SCHEDULED_POSTS) return `this chat already has ${MAX_SCHEDULED_POSTS} scheduled posts`;
+    }
     const now = Date.now();
-    const parsed = parseReminderAnswer(await grok.ask(REMINDER_SYSTEM_PROMPT(now), request), now);
+    const zone = reminders.zone(chatId);
+    const parsed = parseReminderAnswer(await grok.ask(REMINDER_SYSTEM_PROMPT(now, zone, existing), request), now, zone);
     if (!parsed.ok) return parsed.reason;
     const threadId = threadIdOf(message);
-    const id = reminders.add({
-      chatId,
-      threadId,
-      messageId: message.message_id,
-      userId: message.from?.id ?? null,
-      userName: displayName(message.from),
-      text: parsed.text,
-      dueAt: parsed.dueAt,
-      repeat: parsed.repeat,
-      ai,
-    });
+    let id: number;
+    if (existing) {
+      reminders.update(existing.id, parsed);
+      id = existing.id;
+    } else {
+      id = reminders.add({
+        chatId,
+        threadId,
+        messageId: message.message_id,
+        userId: message.from?.id ?? null,
+        userName: displayName(message.from),
+        text: parsed.text,
+        dueAt: parsed.dueAt,
+        repeat: parsed.repeat,
+        ai,
+      });
+    }
+    const title = existing ? "✏️ Changed" : ai ? "🗓 Scheduled post" : "⏰ OK";
     await ctx.reply(
-      `${ai ? "🗓 Scheduled post" : "⏰ OK"}: <b>${escapeHtml(parsed.text)}</b>\n${formatLocalTime(parsed.dueAt)} (${zoneLabel()})${parsed.repeat === "none" ? "" : `, ${repeatLabel(parsed.repeat)}`} · cancel: <code>/unremind ${id}</code>`,
+      `${title}: <b>${escapeHtml(parsed.text)}</b>\n${escapeHtml(formatInZone(parsed.dueAt, zone))} (${escapeHtml(zoneLabel(zone))}, ${formatFromNow(parsed.dueAt, now)})` +
+        `${parsed.repeat === "none" ? "" : `, ${repeatLabel(parsed.repeat)}`}\n<i>Wrong time? <code>/remind edit ${id} …</code></i>`,
       {
         parse_mode: "HTML",
         reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+        reply_markup: { inline_keyboard: [[{ text: "⏸ Pause", callback_data: `rem:p:${id}` }, { text: "🗑 Cancel", callback_data: `rem:x:${id}` }]] },
         ...(threadId ? { message_thread_id: threadId } : {}),
       },
     );
@@ -1215,6 +1361,16 @@ export function createBot({
     const notCommand = (value: string | undefined) => (value && !/^\/tr(@\w+)?(\s|$)/i.test(value) ? value : "");
     let text = ownText || notCommand(source?.text) || (ignoreCaption ? "" : notCommand(source?.caption));
     if (!text && source && voiceOf(source)) text = (await media.transcribeVoice(source))?.text ?? "";
+    if (!text && source && documentOf(source)) {
+      const doc = (await media.document(source))!;
+      if (doc.images.length) {
+        return grok.ask(`Translate all text visible in these pages into ${target}. Output only the translation.`, `Translate the text in "${doc.name}".`, { images: doc.images });
+      }
+      // Long documents: the first part only (a translation must fit in a few messages).
+      const part = doc.text.slice(0, TRANSLATE_DOCUMENT_CHARS);
+      const translation = await grok.ask(system, part);
+      return doc.text.length > part.length ? `${translation}\n\n(${doc.name}: first ${part.length.toLocaleString("en-US")} of ${doc.text.length.toLocaleString("en-US")} characters translated)` : translation;
+    }
     if (!text && source?.photo) {
       const image = await media.photo(source);
       if (image) {
@@ -1468,6 +1624,45 @@ export function describeProbe(results: readonly ProbeResult[], selected: Route):
 
 export function repeatLabel(repeat: string): string {
   return repeat === "daily" ? "every day" : repeat === "weekly" ? "every week" : "once";
+}
+
+/** What the bot does with a document sent without a question. */
+const DOCUMENT_SUMMARY_REQUEST = "Summarize this document: what it is, its main points as bullets, and any important numbers, dates or decisions.";
+/** /tr on a document translates at most this many characters. */
+const TRANSLATE_DOCUMENT_CHARS = 12_000;
+
+/** A document's text for the prompt, with its name and kind. */
+function documentPrompt(doc: { name: string; kind: string; text: string; truncated: boolean }): string {
+  const header = `"${doc.name}" (${doc.kind}${doc.truncated ? "; long, the middle is omitted" : ""})`;
+  return doc.text ? `${header}\n\n${doc.text}` : `${header}: the pages are attached as images.`;
+}
+
+/** One line of /reminders: id, next time, repeat, state, text, who set it, and its delivery history. */
+export function reminderLine(r: Reminder, zone: string): string {
+  const parts = [`${r.ai ? "🗓 " : ""}${r.paused ? "⏸ " : ""}<code>${r.id}</code> · ${escapeHtml(formatInZone(r.dueAt, zone))}`];
+  if (r.repeat !== "none") parts[0] += ` (${repeatLabel(r.repeat)})`;
+  parts.push(`${escapeHtml(r.text)} <i>— ${escapeHtml(r.userName)}</i>`);
+  let line = parts.join(" · ");
+  if (r.sentCount) line += `\n   <i>sent ${r.sentCount}×, last ${escapeHtml(formatInZone(r.lastSentAt ?? 0, zone))}</i>`;
+  if (r.lastError) line += `\n   <i>⚠️ last attempt failed: ${escapeHtml(r.lastError.slice(0, 80))}</i>`;
+  return line;
+}
+
+/** Buttons under a delivered reminder: 💤 snooze (one-off), or snooze/pause (repeating); scheduled posts can be paused. */
+export function reminderKeyboard(r: Pick<Reminder, "id" | "repeat" | "ai">): { inline_keyboard: { text: string; callback_data: string }[][] } {
+  if (r.ai) return { inline_keyboard: [[{ text: "⏸ Pause these posts", callback_data: `rem:p:${r.id}` }]] };
+  if (r.repeat !== "none") {
+    return { inline_keyboard: [[{ text: "💤 1 hour", callback_data: `rem:s:${r.id}:60` }, { text: "⏸ Pause", callback_data: `rem:p:${r.id}` }]] };
+  }
+  return {
+    inline_keyboard: [
+      [
+        { text: "💤 10 min", callback_data: `rem:s:${r.id}:10` },
+        { text: "💤 1 hour", callback_data: `rem:s:${r.id}:60` },
+        { text: "💤 Tomorrow", callback_data: `rem:s:${r.id}:tm` },
+      ],
+    ],
+  };
 }
 
 /** The message a reminder sends when it is due. */

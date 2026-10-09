@@ -5,7 +5,7 @@ export interface Config {
   ownerId: number;
   dataDir: string;
   defaultModel: string;
-  /** Optional; enables Tavily Extract for reading links (falls back to a direct fetch). */
+  /** Optional; Tavily Extract for reading links (falls back to a direct fetch) and Tavily Search for ChatGPT/Claude. */
   tavilyKey?: string;
   /** yt-dlp executable (default: "yt-dlp" on PATH). */
   ytdlpPath?: string;

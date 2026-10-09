@@ -365,3 +365,26 @@ test("panel: 📖 Guide has contents and pages with previous/next navigation", a
   assert.match(buttons, /adm:gd:everyone/, "previous page");
   assert.match(buttons, /adm:gd:private/, "next page");
 });
+
+test("👥 group screen: ✋ toggles confirmations; 🕒 takes a typed zone or city and refuses unknown ones", async () => {
+  const p = panel();
+  p.groups.enable(-100, "Friends");
+  await p.bot.handleUpdate(p.press(OWNER, "adm:gs:-100:confirm"));
+  assert.equal(p.groups.confirmActions(-100), false);
+  const screen = p.calls.filter((c) => c.method === "editMessageText").at(-1)!;
+  const rows = (screen.payload.reply_markup as { inline_keyboard: { text: string }[][] }).inline_keyboard.map((row) => row.map((b) => b.text).join(" | "));
+  assert.ok(rows.includes("🔊 Voice replies: on | ✋ Confirm notes/polls: off"), rows.join("\n"));
+  assert.ok(rows.includes("🕒 Time zone: Taipei"), rows.join("\n"));
+
+  await p.bot.handleUpdate(p.press(OWNER, "adm:gtz:-100"));
+  await settle();
+  await p.bot.handleUpdate(p.privateText(OWNER, "Atlantis"));
+  await settle();
+  assert.equal(p.groups.timeZone(-100), "Asia/Taipei");
+  await p.bot.handleUpdate(p.press(OWNER, "adm:gtz:-100"));
+  await settle();
+  await p.bot.handleUpdate(p.privateText(OWNER, "new york"));
+  await settle();
+  assert.equal(p.groups.timeZone(-100), "America/New_York");
+  assert.match(String(p.calls.filter((c) => c.method === "sendMessage").at(-1)!.payload.text), /Friends: America\/New_York, now 20\d\d-/);
+});

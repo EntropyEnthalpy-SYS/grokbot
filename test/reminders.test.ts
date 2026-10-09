@@ -44,14 +44,14 @@ test("reminder requests are recognised; questions that merely mention reminding 
 });
 
 function storeWith(...entries: Partial<Reminder>[]) {
-  const store = new ReminderStore(openDbAt(":memory:"));
+  const store = new ReminderStore(openDbAt(":memory:"), () => "Asia/Taipei");
   for (const entry of entries) {
     store.add({ chatId: -1, threadId: 0, messageId: 3, userId: 5, userName: "A", text: "t", dueAt: NOW, repeat: "none", ...entry });
   }
   return store;
 }
 
-test("delivery: one-off reminders are deleted, weekly ones move a week on, disabled groups' are dropped, future ones wait", async () => {
+test("delivery: one-off reminders leave the list, weekly ones move a week on, disabled groups' are dropped, future ones wait", async () => {
   const store = storeWith({ text: "once" }, { text: "weekly", repeat: "weekly" }, { text: "gone", chatId: -2 }, { text: "later", dueAt: NOW + HOUR });
   const sent: { chatId: number; text: string; other: Record<string, unknown> }[] = [];
   const api = { sendMessage: async (chatId: number, text: string, other: Record<string, unknown>) => void sent.push({ chatId, text, other }) };
@@ -104,4 +104,71 @@ test("other time zones, with daylight saving: wall-clock times stay put across t
   } finally {
     setTimeZone("Asia/Taipei");
   }
+});
+
+test("a delivered one-off reminder leaves the list but can be snoozed back for a day; then it is pruned", async () => {
+  const store = storeWith({ text: "call the bank" });
+  const api = { sendMessage: async () => undefined };
+  await deliverDueReminders(store, api, () => true, (r) => r.text, NOW);
+  assert.equal(store.count(-1), 0, "no longer listed");
+  const delivered = store.get(-1, 1)!;
+  assert.equal(delivered.sentCount, 1);
+  assert.equal(delivered.lastSentAt, NOW);
+  assert.deepEqual(store.due(NOW + DAY), [], "never sent twice");
+
+  assert.equal(store.snooze(delivered, NOW + 10 * 60_000, NOW), 1, "the same reminder comes back");
+  assert.deepEqual(store.list(-1).map((r) => [r.id, r.dueAt]), [[1, NOW + 10 * 60_000]]);
+  await deliverDueReminders(store, api, () => true, (r) => r.text, NOW + 10 * 60_000);
+  assert.equal(store.get(-1, 1)!.sentCount, 2);
+
+  store.prune(NOW + 10 * 60_000 + DAY - 1);
+  assert.ok(store.get(-1, 1), "kept for a day");
+  store.prune(NOW + 10 * 60_000 + DAY + 1);
+  assert.equal(store.get(-1, 1), undefined);
+});
+
+test("snoozing a daily reminder adds a one-off copy and leaves the daily schedule alone", () => {
+  const store = storeWith({ text: "standup", repeat: "daily" });
+  const daily = store.list(-1)[0]!;
+  const copy = store.snooze(daily, NOW + HOUR, NOW);
+  assert.notEqual(copy, daily.id);
+  assert.deepEqual(
+    store.list(-1).map((r) => [r.id, r.dueAt, r.repeat]),
+    [[daily.id, NOW, "daily"], [copy, NOW + HOUR, "none"]],
+  );
+});
+
+test("paused reminders are not delivered; a resumed daily one continues at its next time without the missed ones", async () => {
+  const store = storeWith({ text: "water plants", repeat: "daily" });
+  const sent: string[] = [];
+  const api = { sendMessage: async (_: number, text: string) => void sent.push(text) };
+  store.setPaused(store.list(-1)[0]!, true, NOW);
+  await deliverDueReminders(store, api, () => true, (r) => r.text, NOW + 3 * DAY + HOUR);
+  assert.deepEqual(sent, []);
+  const resumed = store.setPaused(store.list(-1)[0]!, false, NOW + 3 * DAY + HOUR);
+  assert.equal(resumed.dueAt, NOW + 4 * DAY, "next regular time, same clock time");
+  assert.deepEqual(store.due(NOW + 3 * DAY + HOUR), []);
+});
+
+test("a failed send's retry wait and error survive a restart (they are stored, not in memory)", async () => {
+  const db = openDbAt(":memory:");
+  const first = new ReminderStore(db, () => "Asia/Taipei");
+  first.add({ chatId: -1, threadId: 0, messageId: null, userId: 5, userName: "A", text: "flaky", dueAt: NOW, repeat: "none" });
+  await deliverDueReminders(first, { sendMessage: async () => { throw new Error("Bad Gateway"); } }, () => true, (r) => r.text, NOW);
+  const restarted = new ReminderStore(db, () => "Asia/Taipei");
+  assert.deepEqual(restarted.due(NOW + 30_000), [], "still waiting after the restart");
+  assert.equal(restarted.list(-1)[0]!.lastError, "Bad Gateway", "the error shows in /reminders");
+  assert.equal(restarted.due(NOW + 60_000).length, 1);
+});
+
+test("each chat's time zone: a New York chat's daily 08:00 stays 08:00 across DST; a Taipei chat is unaffected", () => {
+  const db = openDbAt(":memory:");
+  const store = new ReminderStore(db, (chatId) => (chatId === -7 ? "America/New_York" : "Asia/Taipei"));
+  const parsed = parseReminderAnswer('{"at":"2026-10-31 08:00","repeat":"daily","text":"run"}', Date.UTC(2026, 9, 30), store.zone(-7));
+  assert.ok(parsed.ok && parsed.dueAt === Date.UTC(2026, 9, 31, 12, 0), "08:00 EDT");
+  const ny = store.add({ chatId: -7, threadId: 0, messageId: null, userId: 5, userName: "A", text: "run", dueAt: Date.UTC(2026, 9, 31, 12, 0), repeat: "daily" });
+  const tp = store.add({ chatId: -8, threadId: 0, messageId: null, userId: 5, userName: "A", text: "run", dueAt: Date.UTC(2026, 9, 31, 12, 0), repeat: "daily" });
+  for (const id of [ny, tp]) store.delivered(store.get(id === ny ? -7 : -8, id)!, Date.UTC(2026, 10, 1, 13, 30));
+  assert.equal(store.get(-7, ny)!.dueAt, Date.UTC(2026, 10, 2, 13, 0), "08:00 EST is 13:00 UTC");
+  assert.equal(store.get(-8, tp)!.dueAt, Date.UTC(2026, 10, 2, 12, 0), "Taipei has no DST: still 12:00 UTC");
 });

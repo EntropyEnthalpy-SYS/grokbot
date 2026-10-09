@@ -1,7 +1,7 @@
 import type { Db } from "./db.ts";
-import { addLocalDays, formatLocalTime, localToUtc, timeZone } from "./time.ts";
+import { addLocalDays, formatLocalClock, formatLocalTime, localDay, localToUtc, timeZone } from "./time.ts";
 
-/** Reminder times are in the bot's time zone (TIMEZONE, default Asia/Taipei). */
+/** Reminder times are in the chat's time zone (/tz; default TIMEZONE, Asia/Taipei). */
 export { formatLocalTime };
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -9,6 +9,9 @@ export const MAX_REMINDERS_PER_CHAT = 20;
 const MAX_AHEAD_MS = 366 * DAY;
 /** A reminder that can't be delivered for this long (network, Telegram down) is given up. */
 const GIVE_UP_AFTER_MS = 60 * 60 * 1000;
+const RETRY_AFTER_MS = 60_000;
+/** Delivered one-off reminders stay this long so their 💤 Snooze buttons keep working. */
+const KEEP_DELIVERED_MS = DAY;
 
 export const REPEATS = ["none", "daily", "weekly"] as const;
 export type Repeat = (typeof REPEATS)[number];
@@ -26,6 +29,11 @@ export interface Reminder {
   repeat: Repeat;
   /** /schedule: the bot writes the post at due time (text is the task), instead of repeating a fixed text. */
   ai?: boolean;
+  paused?: boolean;
+  /** Delivery history: how often it was sent, when last, and the last failed attempt's error. */
+  sentCount?: number;
+  lastSentAt?: number;
+  lastError?: string;
 }
 
 type Row = {
@@ -39,6 +47,10 @@ type Row = {
   due_at: number;
   repeat: string;
   ai?: number;
+  paused?: number;
+  sent_count?: number;
+  last_sent_at?: number | null;
+  last_error?: string | null;
 };
 
 const fromRow = (row: Row): Reminder => ({
@@ -52,15 +64,27 @@ const fromRow = (row: Row): Reminder => ({
   dueAt: Number(row.due_at),
   repeat: (REPEATS as readonly string[]).includes(row.repeat) ? (row.repeat as Repeat) : "none",
   ai: Number(row.ai ?? 0) === 1,
+  paused: Number(row.paused ?? 0) === 1,
+  sentCount: Number(row.sent_count ?? 0),
+  lastSentAt: row.last_sent_at == null ? undefined : Number(row.last_sent_at),
+  lastError: row.last_error ?? undefined,
 });
+
+/** Reminders still to come. Delivered one-offs are kept a day for snoozing, but are not active. */
+const ACTIVE = "done_at IS NULL";
 
 export class ReminderStore {
   readonly #db: Db;
-  /** Failed sends wait until this time; kept in memory so the scheduled time itself never drifts. */
-  readonly #retryAt = new Map<number, number>();
+  readonly #zoneOf: (chatId: number) => string;
 
-  constructor(db: Db) {
+  /** `zoneOf`: each chat's time zone, so daily/weekly reminders keep their local time across DST. */
+  constructor(db: Db, zoneOf: (chatId: number) => string) {
     this.#db = db;
+    this.#zoneOf = zoneOf;
+  }
+
+  zone(chatId: number): string {
+    return this.#zoneOf(chatId);
   }
 
   add(reminder: Omit<Reminder, "id">, now = Date.now()): number {
@@ -72,39 +96,94 @@ export class ReminderStore {
     return Number(result.lastInsertRowid);
   }
 
+  /** Active reminders of a chat (paused ones included), soonest first. */
   list(chatId: number): Reminder[] {
-    return (this.#db.prepare("SELECT * FROM reminders WHERE chat_id = ? ORDER BY due_at").all(chatId) as Row[]).map(fromRow);
+    return (this.#db.prepare(`SELECT * FROM reminders WHERE chat_id = ? AND ${ACTIVE} ORDER BY due_at`).all(chatId) as Row[]).map(fromRow);
   }
 
   count(chatId: number): number {
-    return Number((this.#db.prepare("SELECT COUNT(*) AS n FROM reminders WHERE chat_id = ?").get(chatId) as { n: number }).n);
+    return Number((this.#db.prepare(`SELECT COUNT(*) AS n FROM reminders WHERE chat_id = ? AND ${ACTIVE}`).get(chatId) as { n: number }).n);
   }
 
+  /** An active reminder, or a delivered one-off that can still be snoozed. */
   get(chatId: number, id: number): Reminder | undefined {
     const row = this.#db.prepare("SELECT * FROM reminders WHERE chat_id = ? AND id = ?").get(chatId, id) as Row | undefined;
     return row ? fromRow(row) : undefined;
   }
 
+  isActive(id: number): boolean {
+    return this.#db.prepare(`SELECT 1 FROM reminders WHERE id = ? AND ${ACTIVE}`).get(id) !== undefined;
+  }
+
   remove(id: number): void {
-    this.#retryAt.delete(id);
     this.#db.prepare("DELETE FROM reminders WHERE id = ?").run(id);
   }
 
+  /** /remind edit: new time, repeat and text. It becomes active again and its failed attempts are forgotten. */
+  update(id: number, change: { dueAt: number; repeat: Repeat; text: string }): void {
+    this.#db
+      .prepare("UPDATE reminders SET due_at = ?, repeat = ?, text = ?, done_at = NULL, retry_at = NULL, attempts = 0, last_error = NULL WHERE id = ?")
+      .run(change.dueAt, change.repeat, change.text, id);
+  }
+
+  /** Pause or resume. A resumed daily/weekly reminder continues at its next regular time, skipping the missed ones. */
+  setPaused(reminder: Reminder, paused: boolean, now = Date.now()): Reminder {
+    const dueAt = paused || reminder.repeat === "none" ? reminder.dueAt : nextDue(reminder.dueAt, reminder.repeat, now, this.zone(reminder.chatId));
+    this.#db.prepare("UPDATE reminders SET paused = ?, due_at = ?, retry_at = NULL, attempts = 0 WHERE id = ?").run(paused ? 1 : 0, dueAt, reminder.id);
+    return { ...reminder, paused, dueAt };
+  }
+
+  /**
+   * 💤 Remind again at `until`. A one-off reminder comes back itself; a daily/weekly one keeps
+   * its schedule and gets a one-off copy. Returns the id of the reminder that will fire.
+   */
+  snooze(reminder: Reminder, until: number, now = Date.now()): number {
+    if (reminder.repeat !== "none") return this.add({ ...reminder, dueAt: until, repeat: "none", ai: false }, now);
+    this.#db
+      .prepare("UPDATE reminders SET due_at = ?, done_at = NULL, paused = 0, retry_at = NULL, attempts = 0, last_error = NULL WHERE id = ?")
+      .run(until, reminder.id);
+    return reminder.id;
+  }
+
   due(now = Date.now()): Reminder[] {
-    return (this.#db.prepare("SELECT * FROM reminders WHERE due_at <= ? ORDER BY due_at").all(now) as Row[])
-      .map(fromRow)
-      .filter((reminder) => (this.#retryAt.get(reminder.id) ?? 0) <= now);
+    return (
+      this.#db
+        .prepare(`SELECT * FROM reminders WHERE ${ACTIVE} AND paused = 0 AND due_at <= ? AND (retry_at IS NULL OR retry_at <= ?) ORDER BY due_at`)
+        .all(now, now) as Row[]
+    ).map(fromRow);
   }
 
-  /** After delivery: repeating reminders move to their next time, one-off ones are deleted. */
-  done(reminder: Reminder, now = Date.now()): void {
-    if (reminder.repeat === "none") return this.remove(reminder.id);
-    this.#retryAt.delete(reminder.id);
-    this.#db.prepare("UPDATE reminders SET due_at = ? WHERE id = ?").run(nextDue(reminder.dueAt, reminder.repeat, now), reminder.id);
+  /** After delivery: repeating reminders move to their next time; one-off ones are kept a day for 💤 snooze. */
+  delivered(reminder: Reminder, now = Date.now()): void {
+    const history = "sent_count = sent_count + 1, last_sent_at = ?, retry_at = NULL, attempts = 0, last_error = NULL";
+    if (reminder.repeat === "none") {
+      this.#db.prepare(`UPDATE reminders SET done_at = ?, ${history} WHERE id = ?`).run(now, now, reminder.id);
+    } else {
+      const next = nextDue(reminder.dueAt, reminder.repeat, now, this.zone(reminder.chatId));
+      this.#db.prepare(`UPDATE reminders SET due_at = ?, ${history} WHERE id = ?`).run(next, now, reminder.id);
+    }
   }
 
-  retryLater(reminder: Reminder, at: number): void {
-    this.#retryAt.set(reminder.id, at);
+  /**
+   * A failed send is retried a minute later. The wait is kept in the database, so a restart
+   * neither loses it nor resends early. After an hour it is given up: one-off reminders are
+   * deleted, repeating ones skip to their next time. The error stays visible in /reminders.
+   */
+  failed(reminder: Reminder, error: string, now = Date.now()): void {
+    const message = error.slice(0, 200);
+    if (now - reminder.dueAt <= GIVE_UP_AFTER_MS) {
+      this.#db.prepare("UPDATE reminders SET retry_at = ?, attempts = attempts + 1, last_error = ? WHERE id = ?").run(now + RETRY_AFTER_MS, message, reminder.id);
+    } else if (reminder.repeat === "none") {
+      this.remove(reminder.id);
+    } else {
+      const next = nextDue(reminder.dueAt, reminder.repeat, now, this.zone(reminder.chatId));
+      this.#db.prepare("UPDATE reminders SET due_at = ?, retry_at = NULL, attempts = 0, last_error = ? WHERE id = ?").run(next, message, reminder.id);
+    }
+  }
+
+  /** Delete delivered one-off reminders whose snooze window has passed. */
+  prune(now = Date.now()): void {
+    this.#db.prepare("DELETE FROM reminders WHERE done_at IS NOT NULL AND done_at < ?").run(now - KEEP_DELIVERED_MS);
   }
 
   forgetChat(chatId: number): number {
@@ -116,21 +195,21 @@ export class ReminderStore {
  * The first time after `now` on the repeat schedule (skips missed ones instead of
  * firing a backlog). Steps by local calendar days, so 08:00 stays 08:00 across DST.
  */
-export function nextDue(dueAt: number, repeat: Repeat, now: number): number {
-  if (dueAt > now) return dueAt;
+export function nextDue(dueAt: number, repeat: Repeat, now: number, tz: string = timeZone()): number {
+  if (dueAt > now || repeat === "none") return dueAt;
   const stepDays = repeat === "weekly" ? 7 : 1;
   // Jump close to `now` first (no long loops after downtime), then step until it's in the future.
   let steps = Math.max(1, Math.floor((now - dueAt) / (stepDays * DAY)));
-  let next = addLocalDays(dueAt, steps * stepDays);
-  while (next <= now) next = addLocalDays(dueAt, ++steps * stepDays);
+  let next = addLocalDays(dueAt, steps * stepDays, tz);
+  while (next <= now) next = addLocalDays(dueAt, ++steps * stepDays, tz);
   return next;
 }
 
 /** The system prompt for writing a scheduled post at its due time. */
-export const SCHEDULED_POST_PROMPT = (now: number) =>
+export const SCHEDULED_POST_PROMPT = (now: number, tz: string = timeZone()) =>
   [
     "You write a scheduled post for a Telegram chat. Do the task below now and output only the post.",
-    `Current time: ${formatLocalTime(now)} (${timeZone()}).`,
+    `Current time: ${formatLocalTime(now, tz)} (${tz}).`,
     "- Search the web for anything current (weather, news, prices, schedules) and keep facts accurate.",
     "- Short and skimmable: a few bullets or lines. Simple Markdown only, no tables.",
     "- Write in the language of the task.",
@@ -138,10 +217,17 @@ export const SCHEDULED_POST_PROMPT = (now: number) =>
 
 export type ParsedReminder = { ok: true; dueAt: number; repeat: Repeat; text: string } | { ok: false; reason: string };
 
-export const REMINDER_SYSTEM_PROMPT = (now: number) =>
+/** `current`: /remind edit, the reminder being changed; the answer is the complete updated reminder. */
+export const REMINDER_SYSTEM_PROMPT = (now: number, tz: string = timeZone(), current?: Pick<Reminder, "dueAt" | "repeat" | "text">) =>
   [
     "You turn a reminder request from a Telegram chat into JSON.",
-    `Current time: ${formatLocalTime(now)} (${timeZone()}).`,
+    `Current time: ${formatLocalTime(now, tz)} (${tz}).`,
+    ...(current
+      ? [
+          `The request CHANGES this existing reminder: ${JSON.stringify({ at: `${localDay(current.dueAt, tz)} ${formatLocalClock(current.dueAt, tz)}`, repeat: current.repeat, text: current.text })}`,
+          "Apply the change and output the complete updated reminder; keep every field the request doesn't mention.",
+        ]
+      : []),
     'Reply with only one JSON object: {"at":"YYYY-MM-DD HH:MM","repeat":"none|daily|weekly","text":"..."}',
     '- "at": the first time to remind, in that local time. If only a day is given, use 09:00. "in 2 hours" etc. count from the current time.',
     '- "repeat": "daily" or "weekly" only when the request says every day / every week (每天, 每週, 每個星期一…), else "none".',
@@ -150,7 +236,7 @@ export const REMINDER_SYSTEM_PROMPT = (now: number) =>
   ].join("\n");
 
 /** Validate Grok's JSON answer for a reminder request. */
-export function parseReminderAnswer(answer: string, now: number): ParsedReminder {
+export function parseReminderAnswer(answer: string, now: number, tz: string = timeZone()): ParsedReminder {
   const json = answer.match(/\{[\s\S]*\}/)?.[0];
   if (!json) return { ok: false, reason: "no time found" };
   let data: { at?: unknown; repeat?: unknown; text?: unknown; error?: unknown };
@@ -163,7 +249,7 @@ export function parseReminderAnswer(answer: string, now: number): ParsedReminder
   const match = typeof data.at === "string" ? data.at.trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/) : null;
   if (!match) return { ok: false, reason: "no time found" };
   const [, y, mo, d, h, mi] = match.map(Number) as [number, number, number, number, number, number];
-  const dueAt = localToUtc(y, mo, d, h, mi);
+  const dueAt = localToUtc(y, mo, d, h, mi, tz);
   const repeat: Repeat = (REPEATS as readonly string[]).includes(String(data.repeat)) ? (data.repeat as Repeat) : "none";
   const text = typeof data.text === "string" ? data.text.trim().slice(0, 500) : "";
   if (!text) return { ok: false, reason: "nothing to remind about" };
@@ -171,8 +257,8 @@ export function parseReminderAnswer(answer: string, now: number): ParsedReminder
   if (dueAt > now + MAX_AHEAD_MS) return { ok: false, reason: "that is more than a year away" };
   if (dueAt <= now) {
     // "every Monday 9:00" asked on Monday afternoon: start next week. A one-off time in the past is an error.
-    if (repeat === "none") return { ok: false, reason: `${formatLocalTime(dueAt)} has already passed` };
-    return { ok: true, dueAt: nextDue(dueAt, repeat, now), repeat, text };
+    if (repeat === "none") return { ok: false, reason: `${formatLocalTime(dueAt, tz)} has already passed` };
+    return { ok: true, dueAt: nextDue(dueAt, repeat, now, tz), repeat, text };
   }
   return { ok: true, dueAt, repeat, text };
 }
@@ -189,6 +275,7 @@ export interface ReminderSender {
 /**
  * Send every reminder that is due. Reminders for groups that were disabled are
  * dropped; failed sends are retried each minute for up to an hour.
+ * `markup` adds buttons under a reminder (💤 snooze, ⏸ pause).
  */
 export async function deliverDueReminders(
   store: ReminderStore,
@@ -196,6 +283,7 @@ export async function deliverDueReminders(
   isActive: (chatId: number) => boolean,
   render: (reminder: Reminder) => string | Promise<string>,
   now = Date.now(),
+  markup?: (reminder: Reminder) => unknown,
 ): Promise<number> {
   let sent = 0;
   // Plain reminders first: an AI-written post can take a while and must not hold them up.
@@ -206,18 +294,19 @@ export async function deliverDueReminders(
       continue;
     }
     try {
+      const keyboard = markup?.(reminder);
       await api.sendMessage(reminder.chatId, await render(reminder), {
         parse_mode: "HTML",
         // Scheduled posts stand on their own; plain reminders point back at the request.
         ...(reminder.messageId && !reminder.ai ? { reply_parameters: { message_id: reminder.messageId, allow_sending_without_reply: true } } : {}),
         ...(reminder.threadId ? { message_thread_id: reminder.threadId } : {}),
+        ...(keyboard ? { reply_markup: keyboard } : {}),
       });
-      store.done(reminder, now);
+      store.delivered(reminder, now);
       sent++;
     } catch (error) {
       console.warn(`reminder ${reminder.id} failed: ${(error as Error).message}`);
-      if (now - reminder.dueAt > GIVE_UP_AFTER_MS) store.done(reminder, now);
-      else store.retryLater(reminder, now + 60_000);
+      store.failed(reminder, (error as Error).message, now);
     }
   }
   return sent;

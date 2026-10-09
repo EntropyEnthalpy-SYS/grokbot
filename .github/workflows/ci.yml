@@ -11,8 +11,8 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      # Voice-note and media tests convert audio with ffmpeg.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      # Voice-note and media tests convert audio with ffmpeg; document tests read PDFs with poppler.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg poppler-utils
       - run: npm ci
       - run: npm run typecheck
       - run: npm test

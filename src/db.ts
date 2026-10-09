@@ -119,6 +119,18 @@ export function openDbAt(path: string): Db {
   addColumnIfMissing(db, "reminders", "ai", "INTEGER NOT NULL DEFAULT 0");
   // Who may use the bot in a group: everyone (default) or approved members only.
   addColumnIfMissing(db, "groups", "access", "TEXT NOT NULL DEFAULT 'everyone'");
+  // /tz: the group's time zone ("" = the bot's TIMEZONE).
+  addColumnIfMissing(db, "groups", "timezone", "TEXT NOT NULL DEFAULT ''");
+  // Notes and polls suggested by the AI wait for the asker's ✅ before they take effect.
+  addColumnIfMissing(db, "groups", "confirm_actions", "INTEGER NOT NULL DEFAULT 1");
+  // Reminder lifecycle: paused, delivered one-offs kept a day for 💤 snooze, delivery history and retries.
+  addColumnIfMissing(db, "reminders", "paused", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "reminders", "done_at", "INTEGER");
+  addColumnIfMissing(db, "reminders", "sent_count", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "reminders", "last_sent_at", "INTEGER");
+  addColumnIfMissing(db, "reminders", "retry_at", "INTEGER");
+  addColumnIfMissing(db, "reminders", "attempts", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "reminders", "last_error", "TEXT");
   migrateTrusted(db);
   return db;
 }

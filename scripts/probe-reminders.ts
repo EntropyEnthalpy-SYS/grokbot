@@ -21,7 +21,7 @@ console.log(`tr zh-tw: ${await app.grok.ask(tr("Traditional Chinese (Taiwan)"), 
 console.log(`tr zh-tw (already Chinese): ${await app.grok.ask(tr("Traditional Chinese (Taiwan)"), "會議改到週五晚上。")}`);
 const chatId = Number(process.argv[2]);
 if (chatId) {
-  const id = new ReminderStore(app.db).add({ chatId, threadId: 0, messageId: null, userId: null, userName: "deploy check", text: "測試提醒 / test reminder (/reminders works)", dueAt: Date.now() + 30_000, repeat: "none" });
+  const id = new ReminderStore(app.db, (id) => app.groups.timeZone(id)).add({ chatId, threadId: 0, messageId: null, userId: null, userName: "deploy check", text: "測試提醒 / test reminder (/reminders works)", dueAt: Date.now() + 30_000, repeat: "none" });
   console.log(`scheduled reminder ${id} in 30 s`);
 }
 app.db.close();

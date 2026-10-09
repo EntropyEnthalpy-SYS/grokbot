@@ -1,6 +1,6 @@
 import { bilibiliDownloader, createApp } from "./app.ts";
 import { loadConfig, loadDotEnv } from "./config.ts";
-import { createBot, registerCommands, renderReminder } from "./telegram/bot.ts";
+import { createBot, registerCommands, reminderKeyboard, renderReminder } from "./telegram/bot.ts";
 import { deliverDueReminders, ReminderStore } from "./reminders.ts";
 import { diskCheck, HealthMonitor, memoryCheck, socksCheck, ytdlpAgeCheck, type Check } from "./health.ts";
 import { run } from "./media/run.ts";
@@ -22,9 +22,10 @@ process.on("unhandledRejection", (reason) => console.error("unhandled rejection:
 const config = loadConfig();
 setTimeZone(config.timeZone);
 setDefaultLanguage(config.defaultLanguage);
-const { db, grok, sessions, groups, reader, video, parsehub, images, memory, speakers, polls, limits } = createApp(config);
+const { db, grok, sessions, groups, reader, video, parsehub, images, memory, speakers, polls, actions, limits } = createApp(config);
 const cache = new CardCache(db);
-const reminders = new ReminderStore(db);
+// Each chat's /tz decides what "every day 08:00" means for its reminders.
+const reminders = new ReminderStore(db, (chatId) => groups.timeZone(chatId));
 const usage = new UsageStore(db);
 grok.onUsage = (provider, input, output) => usage.recordTokens(provider, input, output);
 const ops = new OpsClient(`${config.dataDir}/ops`);
@@ -100,6 +101,7 @@ const bot = createBot({
   db,
   cookies: new CookieStore(`${config.dataDir}/parsehub-cookies.json`),
   polls,
+  actions,
   ops,
   backup: () => backupWithoutSecrets(db, backupDir),
   health,
@@ -134,6 +136,7 @@ const housekeeping = () => {
   groups.prune();
   cache.prune();
   usage.prune();
+  reminders.prune();
   // Conversations with the bot expire like the group log.
   sessions.prune();
   void removeStaleMedia(`${config.dataDir}/media`, 60 * 60 * 1000);
@@ -147,7 +150,14 @@ let delivering = false;
 const reminderTimer = setInterval(() => {
   if (delivering) return;
   delivering = true;
-  deliverDueReminders(reminders, bot.api, (chatId) => chatId > 0 || groups.isEnabled(chatId), (r) => (r.ai ? writeScheduledPost(r) : renderReminder(r)))
+  deliverDueReminders(
+    reminders,
+    bot.api,
+    (chatId) => chatId > 0 || groups.isEnabled(chatId),
+    (r) => (r.ai ? writeScheduledPost(r) : renderReminder(r)),
+    Date.now(),
+    reminderKeyboard,
+  )
     .catch((error) => console.error("reminders failed:", error))
     .finally(() => (delivering = false));
 }, 20_000);
@@ -186,7 +196,7 @@ await bot.start({
 /** /schedule: the bot writes the post at due time (with web search). Throws → retried each minute for an hour. */
 async function writeScheduledPost(reminder: Reminder): Promise<string> {
   const now = Date.now();
-  const answer = await grok.ask(SCHEDULED_POST_PROMPT(now), reminder.text, { search: true });
+  const answer = await grok.ask(SCHEDULED_POST_PROMPT(now, reminders.zone(reminder.chatId)), reminder.text, { search: true });
   // One message: the first ~3000 characters (HTML tags add a little; Telegram's limit is 4096).
   const body = splitMarkdown(answer, 3000)[0] ?? answer.slice(0, 3000);
   usage.record(reminder.chatId, { id: reminder.userId ?? undefined, name: reminder.userName }, "card");
