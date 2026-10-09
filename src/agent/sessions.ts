@@ -342,13 +342,13 @@ export const FINISH_NOW =
   "(automatic note) Your last reply didn't answer: it was empty or only said you would check, but you can't send another message later. Do it now with your tools (search, read_link…) and give the result in this reply. If you can't find it, say what you found and what's missing.";
 
 /** A lookup verb ("查", "核对", "調べ", "check"…). */
-const LOOKUP = /查|搜|找|核對|核对|確認|确认|看看|調べ|確認し|探し|検索|\b(check(ing)?|look(ing)? (it |that )?(up|into)|search(ing)?|verify(ing)?|find(ing)? out|dig(ging)? (in|into))\b/i;
+const LOOKUP = /查|搜|找|翻|挖|核|對一下|对一下|比對|比对|確認|确认|看看|試試|试试|研究|調べ|確認し|探し|検索|\b(check(ing)?|look(ing)? (it |that )?(up|into)|search(ing)?|verify(ing)?|find(ing)? out|dig(ging)? (in|into))\b/i;
 /** Who promises, or "right now": first person, "hold on", or a Japanese polite future. */
-const PROMISE = /我|咱|讓我|让我|等我|稍等|馬上|马上|這就|这就|現在|现在|接下來|接下来|ます|みます|ましょう|\b(let me|i'?ll|i will|i'?m going to|hold on|checking|searching|looking|digging)\b/i;
+const PROMISE = /我|咱|讓我|让我|等我|稍等|馬上|马上|這就|这就|現在|现在|正在|還在|还在|繼續|继续|接下來|接下来|ます|みます|ましょう|\b(let me|i'?ll|i will|i'?m going to|hold on|checking|searching|looking|digging)\b/i;
 /** Not a promise: no need / don't, someone else should look, or the lookup already happened. */
 const NOT_PROMISE = new RegExp(
   [
-    "不用|不必|不需要|沒必要|没必要|別|别|不要|自己|建議|建议|可以去",
+    "不用|不必|不需要|沒必要|没必要|(別|别)(?![的人處处家])|不要|自己|建議|建议|可以去",
     "(?<![帮幫替给給])(你|您|妳)(可以|先|再|去|自己)?(查|搜|找|看)",
     "(查|搜|找|核對|核对|確認|确认)(過|过|到|完|好了|不到|是|為|为)",
     "\\b(can'?t|cannot|won'?t|no need|already|you can|you could)\\b",

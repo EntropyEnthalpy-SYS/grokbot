@@ -263,11 +263,12 @@ test("a reply that only promises a lookup is not an answer; results, advice and 
     "稍等，我搜一下", "我幫你查查", "我帮你查一下", "等我查一下哈", "我去搜搜看", "我再确认下。", "好，马上查。",
     "收到，我查一下资料。", "我来查一下最新消息。", "我查一下，稍等。", "稍等", "One moment.",
     "調べてみます。", "確認します！", "Let me check.", "I'll look that up…", "Let me look into it.", "Hold on, checking.",
+    "还在对，我按河南超硬材料再搜一轮。", "我再翻一下", "还在找", "正在查", "我按这个方向再挖一下", "还没查到，我再试试别的关键词。", "我继续查",
   ];
   const answers = [
     "唱不了，歌词也不能整段贴。想听的话去油管搜陈一发儿的《童话镇》就行。", "查不到。", "你可以自己查。", "这个不用查，就是台积电。",
-    "我觉得不用查了。", "可以看看官網。", "我查過了，是翊聯電子。", "建議去官網查。", "别查了，没意义。", "我确认是翊联。", "我找到了：在郑州。",
-    "要我查一下嗎？", "Let me know!", "I already checked: it's Zhengzhou.", "You can check the official site.", "好的，我記住了。",
+    "我觉得不用查了。", "可以看看官網。", "我查過了，是翊聯電子。", "建議去官網查。", "别查了，没意义。", "别再搜了。", "我确认是翊联。", "我找到了：在郑州。",
+    "要我查一下嗎？", "我研究過了，是A。", "核心是成本。", "翻譯如下：你好。", "你试试重启。", "Let me know!", "I already checked: it's Zhengzhou.", "You can check the official site.", "好的，我記住了。",
     `我查一下，结果是：${"翊联电子在郑州，主营超硬材料".repeat(4)}`,
   ];
   assert.deepEqual(promises.filter((t) => !isBarePromise(t)), [], "missed promises");
