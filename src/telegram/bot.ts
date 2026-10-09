@@ -20,7 +20,7 @@ import type { Message } from "grammy/types";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { TurnCancelledError, type ChatSessions } from "../agent/sessions.ts";
 import { assistantText, CHAT_PROVIDERS, errorMessage, ROUTES, type Grok, type ProbeResult, type Route } from "../grok/grok.ts";
-import { linkKind } from "../links/detect.ts";
+import { isAdultUrl, isTelegramLink, linkKind } from "../links/detect.ts";
 import { untrusted } from "../links/reader.ts";
 import { summarizeLink, videoCardFromInfo, type LinkSummaryDeps } from "../links/summarize.ts";
 import type { VideoReader } from "../media/video.ts";
@@ -1066,7 +1066,7 @@ export function createBot({
     const chatId = ctx.chat!.id;
     const threadId = threadIdOf(message);
     const normal = groups.privacy(chatId) === "normal";
-    if (isAddressedToBot(message, me)) {
+    if (isAddressedToBot(message, me, (id) => groups.isAuto(chatId, id))) {
       if (!mayAsk(ctx, chatId)) return refuseOverLimit(ctx, message, threadId);
       void ctx.react("👀").catch(() => undefined);
       background(ctx, () => answers.use(() => answerInGroup(ctx, message, threadId)));
@@ -1080,11 +1080,13 @@ export function createBot({
     const auto = groups.linkMode(chatId) === "auto";
     // Shared videos get a card like links do; round video messages are personal speech, so only in normal mode.
     const sharedVideo = message.video ?? (normal ? message.video_note : undefined);
-    if (sharedVideo && auto && autoCards.take(String(chatId))) {
+    if (sharedVideo && auto && !groups.disabledPlatforms(chatId).has("upload") && autoCards.take(String(chatId))) {
       background(ctx, () => autoJobs.use(() => showUploadedVideo(ctx, message, threadId)), { quiet: true });
       return;
     }
-    const found = linksIn(message);
+    // Telegram channel/group links (forwarded posts' footers) aren't content; adult sites are skipped unless the owner allows them.
+    const hideAdult = groups.hideAdult(chatId);
+    const found = linksIn(message).filter((url) => !isTelegramLink(url) && !(hideAdult && isAdultUrl(url)));
     if (found.length > 0 && auto && autoCards.take(String(chatId))) {
       background(ctx, () => autoJobs.use(() => showLinkContent(ctx, message, found, threadId)), { quiet: true });
     }
@@ -1191,7 +1193,7 @@ export function createBot({
       isBot: false,
       at: Date.now(),
     });
-    logBotMessage(ctx, chatId, threadId, sent.message_id, `[transcript of ${displayName(message.from)}'s voice message]\n${body}`);
+    autoPost(ctx, chatId, threadId, [sent.message_id], `[transcript of ${displayName(message.from)}'s voice message]\n${body}`);
     if (startsWithBotName(result.text)) {
       if (!mayAsk(ctx, chatId)) return refuseOverLimit(ctx, message, threadId);
       await answers.use(() => answerInGroup(ctx, message, threadId, result.text));
@@ -1214,7 +1216,7 @@ export function createBot({
     }
     const ids = await new ReplyStreamer(bot.api, chatId, { replyTo: message.message_id, threadId }).finish(card);
     usage.record(chatId, who(ctx), "card");
-    for (const id of ids) logBotMessage(ctx, chatId, threadId, id, `[content of a video ${displayName(message.from)} uploaded]\n${card}`);
+    autoPost(ctx, chatId, threadId, ids, `[content of a video ${displayName(message.from)} uploaded]\n${card}`);
   }
 
   /**
@@ -1244,7 +1246,7 @@ export function createBot({
             const sent = await sendXCard(bot.api, chatId, card, replyOptions);
             if (!hit && sent.reusable) links.cache.put(url, lang, "twitter", sent.reusable);
             // Link first: reply context is truncated from the end.
-            for (const id of sent.ids) logBotMessage(ctx, chatId, threadId, id, `[content of ${url}]\n${card.plain}`);
+            autoPost(ctx, chatId, threadId, sent.ids, `[content of ${url}]\n${card.plain}`);
             shown++;
             continue;
           }
@@ -1260,7 +1262,7 @@ export function createBot({
               );
               if (result.status === "disabled") continue;
               if (result.status === "sent") {
-                for (const id of result.ids) logBotMessage(ctx, chatId, threadId, id, `[content of ${url}]\n${result.plain}`);
+                autoPost(ctx, chatId, threadId, result.ids, `[content of ${url}]\n${result.plain}`);
                 shown++;
                 continue;
               }
@@ -1279,7 +1281,7 @@ export function createBot({
               lang,
               replyOptions,
             );
-            for (const id of sent.ids) logBotMessage(ctx, chatId, threadId, id, `[content of ${url}]\n${sent.plain}`);
+            autoPost(ctx, chatId, threadId, sent.ids, `[content of ${url}]\n${sent.plain}`);
             shown++;
             continue;
           }
@@ -1295,7 +1297,7 @@ export function createBot({
       const text = webCards.map((entry) => entry.card).join("\n\n");
       const ids = await new ReplyStreamer(bot.api, chatId, { replyTo: message.message_id, threadId }).finish(text);
       const logged = `[content of ${webCards.map((entry) => entry.url).join(", ")}]\n${text}`;
-      for (const id of ids) logBotMessage(ctx, chatId, threadId, id, logged);
+      autoPost(ctx, chatId, threadId, ids, logged);
       shown += webCards.length;
     }
     usage.record(chatId, who(ctx), "card", shown);
@@ -1492,6 +1494,12 @@ export function createBot({
   bot.on("stopped_message_generation", (ctx) => {
     sessions.abort(sessionKey(ctx.update.stopped_message_generation!.chat.id, 0));
   });
+
+  /** A card or transcript the bot posted by itself: remembered as automatic (replies to it aren't questions), and logged. */
+  function autoPost(ctx: Context, chatId: number, threadId: number, ids: readonly number[], text: string): void {
+    groups.markAuto(chatId, ids);
+    for (const id of ids) logBotMessage(ctx, chatId, threadId, id, text);
+  }
 
   function logBotMessage(ctx: Context, chatId: number, threadId: number, messageId: number | undefined, text: string): void {
     // Strict groups keep no log at all: bot answers often quote the person who asked.

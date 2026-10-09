@@ -105,9 +105,19 @@ export function createApp(options: {
       polls.tool(key, confirmFor(key)),
       ...(search.available ? [searchWebTool(search)] : []),
     ],
-    systemExtra: (key) => `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key)),
+    systemExtra: (key) =>
+      `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + scriptBlock(groups, chatIdOf(key)) + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key)),
   });
   return { db, grok, sessions, groups, reader, video, parsehub, images, memory, speakers, polls, actions, limits };
+}
+
+/** The group's Chinese script (/lang zh-cn or zh-tw): cards use it, so answers in Chinese should too. */
+function scriptBlock(groups: GroupStore, chatId: number): string {
+  if (!(chatId < 0)) return "";
+  const lang = groups.language(chatId);
+  if (lang === "zh-cn") return "\n- This group uses Simplified Chinese: when you answer in Chinese, write Simplified characters (简体).";
+  if (lang === "zh-tw") return "\n- This group uses Traditional Chinese: when you answer in Chinese, write Traditional characters (繁體).";
+  return "";
 }
 
 /** The owner's style for a group, added to the system prompt of every request there. */

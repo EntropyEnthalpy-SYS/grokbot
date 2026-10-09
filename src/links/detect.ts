@@ -70,6 +70,39 @@ export function normalizeUrl(raw: string): string | undefined {
   return url.href;
 }
 
+function hostOf(href: string): string | undefined {
+  try {
+    return new URL(href).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return undefined;
+  }
+}
+
+const matchesHost = (host: string, domains: ReadonlySet<string>) => [...domains].some((d) => host === d || host.endsWith(`.${d}`));
+
+/** t.me / telegram.me links: channels, groups and invites (forwarded posts end with them). Not content to summarize. */
+export function isTelegramLink(href: string): boolean {
+  const host = hostOf(href);
+  return host !== undefined && matchesHost(host, TELEGRAM_HOSTS);
+}
+const TELEGRAM_HOSTS = new Set(["t.me", "telegram.me", "telegram.dog", "telegram.org"]);
+
+/** Adult sites: well-known domains, or a host name that says so ("…porn…", "…xxx…", ".xxx", "…hentai…"). */
+export function isAdultUrl(href: string): boolean {
+  const host = hostOf(href);
+  if (!host) return false;
+  if (matchesHost(host, ADULT_HOSTS)) return true;
+  // Every label, the ending too: .xxx is the adult-site top-level domain.
+  return host.split(".").some((label) => /porn|xxx|hentai|nsfw/.test(label));
+}
+const ADULT_HOSTS = new Set([
+  "pornhub.com", "xvideos.com", "xnxx.com", "xhamster.com", "redtube.com", "youporn.com", "tube8.com", "spankbang.com",
+  "eporner.com", "beeg.com", "txxx.com", "motherless.com", "onlyfans.com", "fansly.com", "manyvids.com", "chaturbate.com",
+  "stripchat.com", "bongacams.com", "livejasmin.com", "cam4.com", "camsoda.com", "brazzers.com", "missav.com", "missav.ws",
+  "jable.tv", "avgle.com", "supjav.com", "thisav.com", "javlibrary.com", "javdb.com", "nhentai.net", "e-hentai.org",
+  "rule34.xxx", "91porn.com", "hanime.tv", "iwara.tv", "erome.com", "rule34video.com",
+]);
+
 export function linkKind(href: string): LinkKind {
   let host: string;
   try {

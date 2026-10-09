@@ -25,7 +25,7 @@ In a group it stays quiet until addressed: <b>@mention</b> it, <b>reply</b> to o
   In groups, notes and polls first appear as a preview: the person who asked taps ✅ (or ✖️).
 • a voice message starting with “grok, …” → answer in text and voice
 
-Automatic: posted links show what they contain (no comments), voice notes get a transcript.`;
+Automatic: posted links show what they contain (no comments), voice notes get a transcript. Replying to such a card is talking to the group; add <b>grok,</b> to ask the bot about it. No cards for t.me links or adult sites.`;
 
 const EVERYONE = `<b>⌨️ Commands for everyone</b>
 • <code>/tr</code> (reply to text, voice, a photo or a document) → translation; <code>/tr en 你好</code> for given text
@@ -43,7 +43,7 @@ const OWNER_GROUP = `<b>👑 Owner commands in a group</b>
 • <code>/enable</code> · <code>/disable</code> → bot on/off here (new groups start strict)
 • <code>/privacy strict</code> · <code>normal</code> → strict stores nothing; normal keeps 7 days of context
 • <code>/links auto</code> · <code>mention</code> · <code>off</code> → link cards always / when asked / never
-• <code>/platforms off douyin weibo</code> → cards off per platform (<code>/platforms</code> lists)
+• <code>/platforms off douyin weibo</code> → cards off per platform (<code>/platforms</code> lists; <code>upload</code> = uploaded videos)
 • <code>/lang zh-tw</code> → zh-tw · zh-cn · en · ja · ko · off
 • <code>/tz Asia/Tokyo</code> · <code>/tz default</code> → time zone for reminders and the time the AI is told
 • <code>/voice auto</code> · <code>off</code> → automatic voice transcripts
@@ -67,7 +67,7 @@ const OWNER_PRIVATE = `<b>🔑 Owner commands in private chat</b>
 
 const PANEL = `<b>🗂 The panel</b>
 • 🤖 <b>AI providers</b>: sign in to Grok / ChatGPT / Claude, order them, pick models
-• 👥 <b>Groups</b>: links · privacy · language · voice · tidy · who can use it · persona · voice replies · ✋ confirm notes/polls · 🕒 time zone
+• 👥 <b>Groups</b>: links · privacy · language · voice · tidy · who can use it · persona · voice replies · ✋ confirm notes/polls · 🕒 time zone · 🔞 adult links
 • 📈 <b>Usage</b>: who used what (today / 7 / 30 days), tokens per provider
 • ⚖️ <b>Limits</b>: ➖/➕ per limit, ⭐ trusted members
 • 🔐 <b>Permissions</b>: per person 💬 private chat · ✅ approved · ⭐ trusted · ⛔ blocked; ➕ add people

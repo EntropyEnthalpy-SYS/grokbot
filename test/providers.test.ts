@@ -374,7 +374,9 @@ test("👥 group screen: ✋ toggles confirmations; 🕒 takes a typed zone or c
   const screen = p.calls.filter((c) => c.method === "editMessageText").at(-1)!;
   const rows = (screen.payload.reply_markup as { inline_keyboard: { text: string }[][] }).inline_keyboard.map((row) => row.map((b) => b.text).join(" | "));
   assert.ok(rows.includes("🔊 Voice replies: on | ✋ Confirm notes/polls: off"), rows.join("\n"));
-  assert.ok(rows.includes("🕒 Time zone: Taipei"), rows.join("\n"));
+  assert.ok(rows.includes("🕒 Time zone: Taipei | 🔞 Adult links: hidden"), rows.join("\n"));
+  await p.bot.handleUpdate(p.press(OWNER, "adm:gs:-100:adult"));
+  assert.equal(p.groups.hideAdult(-100), false);
 
   await p.bot.handleUpdate(p.press(OWNER, "adm:gtz:-100"));
   await settle();

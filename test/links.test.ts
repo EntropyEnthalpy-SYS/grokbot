@@ -206,3 +206,16 @@ test("content cards: pages go to Grok as untrusted data in the group's language;
   await assert.rejects(summarizeLink(deps, "https://broken.example/", "English"), /no content card/);
   assert.equal(asks.length, 5, "failed cards are not cached");
 });
+
+import { isAdultUrl, isTelegramLink } from "../src/links/detect.ts";
+
+test("Telegram links and adult sites are recognized by host, including subdomains; similar names are not", () => {
+  for (const url of ["https://t.me/zaihuanews", "https://t.me/+AbCdEf", "https://telegram.me/x", "https://www.t.me/s/chan"]) assert.equal(isTelegramLink(url), true, url);
+  for (const url of ["https://notme.com/t.me", "https://telegraph.co.uk/", "https://t.co/abc"]) assert.equal(isTelegramLink(url), false, url);
+  for (const url of ["https://pornhub.com/", "https://cn.pornhub.com/view", "https://www.xvideos.com/v1", "https://missav.ws/x", "https://best-porn-site.net/", "https://xxxvideos.example/", "https://example.xxx/"]) {
+    assert.equal(isAdultUrl(url), true, url);
+  }
+  for (const url of ["https://essex.ac.uk/", "https://www.sussex.gov.uk/", "https://example.com/porn-policy", "https://github.com/x/xxx"]) {
+    assert.equal(isAdultUrl(url), false, url);
+  }
+});

@@ -440,6 +440,7 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
       .text(`✋ Confirm notes/polls: ${on(groups.confirmActions(chatId))}`, `adm:gs:${chatId}:confirm`)
       .row()
       .text(`🕒 Time zone: ${zoneLabel(groups.timeZone(chatId))}`, `adm:gtz:${chatId}`)
+      .text(`🔞 Adult links: ${groups.hideAdult(chatId) ? "hidden" : "shown"}`, `adm:gs:${chatId}:adult`)
       .row()
       .text(groups.persona(chatId) ? "🎭 Change persona" : "🎭 Set persona", `adm:gp:${chatId}`);
     if (groups.persona(chatId)) keyboard.text("🎭 Clear", `adm:gpc:${chatId}`);
@@ -480,6 +481,8 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
         return groups.setAccess(chatId, groups.access(chatId) === "approved" ? "everyone" : "approved");
       case "confirm":
         return groups.setConfirmActions(chatId, !groups.confirmActions(chatId));
+      case "adult":
+        return groups.setHideAdult(chatId, !groups.hideAdult(chatId));
     }
   }
 

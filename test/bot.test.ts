@@ -152,7 +152,15 @@ function harness(
       update_id: ++updateId,
       callback_query: { id: String(updateId), from: { id: from, is_bot: false, first_name: `user${from}` }, chat_instance: "c", data, message: { message_id: 1, date: 0, chat } },
     }) as Update;
-  return { bot, calls, runs, until, press, actions, groups, reminders, memory, speakers, usage, limits, permissions, polls, asked, created, images, groupText, settle, next: () => ++updateId };
+  /** Wait until `done()` holds (fails the test after `ms`), instead of guessing how long the bot takes. */
+  const waitFor = async (done: () => boolean, ms = 5000) => {
+    const deadline = Date.now() + ms;
+    while (!done()) {
+      if (Date.now() > deadline) throw new Error("timed out waiting for the bot");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  return { bot, calls, runs, until, waitFor, press, actions, groups, reminders, memory, speakers, usage, limits, permissions, polls, asked, created, images, groupText, settle, next: () => ++updateId };
 }
 
 test("inline queries reach their handler (they have no chat, unlike every other update)", async () => {
@@ -285,7 +293,7 @@ test("a screenshot captioned “/tr” gets the text in the image translated (gr
   h.groups.enable(GROUP, "Grok bot test");
   const photo = [{ file_id: "p1", file_unique_id: "p1", width: 800, height: 600 }];
   await h.bot.handleUpdate(h.groupText(OWNER, "", { text: undefined, photo, caption: "/tr" }));
-  await h.settle();
+  await h.until((c) => c.method === "sendMessage");
   assert.equal(h.asked.length, 1);
   assert.equal(h.asked[0]!.images, 1);
   assert.match(h.asked[0]!.system, /text visible in the image into Traditional Chinese/);
@@ -303,7 +311,7 @@ test("“/tr en” as a caption picks the language; other captions are not comma
   await h.settle();
   assert.equal(h.asked.length, 0);
   await h.bot.handleUpdate(h.groupText(OWNER, "", { text: undefined, photo, caption: "/tr en" }));
-  await h.settle();
+  await h.waitFor(() => h.asked.length > 0);
   assert.match(h.asked[0]!.system, /into English/);
 });
 
@@ -319,7 +327,7 @@ test("/tr replying to a screenshot captioned “/tr” translates the image, not
   h.groups.enable(GROUP, "Grok bot test");
   const screenshot = { message_id: 50, date: 0, chat: { id: GROUP, type: "supergroup" }, from: { id: OWNER, is_bot: false, first_name: "O" }, photo: photoOf("p1"), caption: "/tr" };
   await h.bot.handleUpdate(h.groupText(OWNER, "/tr@GrokTest_bot", { reply_to_message: screenshot }));
-  await h.settle();
+  await h.waitFor(() => h.asked.length > 0);
   assert.equal(h.asked.length, 1);
   assert.equal(h.asked[0]!.images, 1, "the screenshot is read");
   assert.notEqual(h.asked[0]!.prompt, "/tr");
@@ -815,4 +823,56 @@ test("what members see when a reply has no text, or was cut off at the length li
   await h.bot.handleUpdate(h.groupText(7, "grok, 寫長文"));
   await h.settle();
   assert.match(lastText(), /第一段[\s\S]*cut off at the length limit/);
+});
+
+test("a reply to the bot's automatic post (a voice transcript) is a comment, unless it says grok; replies to its answers are questions", async () => {
+  const voice = join(mkdtempSync(join(tmpdir(), "v-")), "q.ogg");
+  writeFileSync(voice, "ogg bytes");
+  const h = harness({ loggedIn: true, files: { v1: voice } });
+  h.groups.enable(GROUP, "Grok bot test");
+  h.groups.setPrivacy(GROUP, "normal");
+  await h.bot.handleUpdate(h.groupText(5, "", { text: undefined, voice: { file_id: "v1", file_unique_id: "v1", duration: 3 } }));
+  await h.until((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("🎙️"));
+  const transcript = { message_id: 1, date: 0, chat: { id: GROUP, type: "supergroup" }, from: { id: 999, is_bot: true, first_name: "Grokky" }, text: "🎙️ 現在幾點？" };
+  assert.equal(h.groups.isAuto(GROUP, 1), true, "the transcript is remembered as automatic");
+
+  await h.bot.handleUpdate(h.groupText(6, "哈哈 他又在问时间", { reply_to_message: transcript }));
+  await h.settle();
+  assert.equal(h.runs.length, 0, "talking about the transcript doesn't summon the bot");
+  await h.bot.handleUpdate(h.groupText(6, "grok, 他说的对吗", { reply_to_message: transcript }));
+  await h.settle();
+  assert.equal(h.runs.length, 1);
+
+  const answer = { ...transcript, message_id: 50, text: "现在是下午三点。" };
+  await h.bot.handleUpdate(h.groupText(6, "那北京呢", { reply_to_message: answer }));
+  await h.settle();
+  assert.equal(h.runs.length, 2, "a reply to an answer continues the conversation");
+});
+
+test("no cards for t.me links or adult sites (unless the owner shows them); /platforms off upload stops video cards", async () => {
+  const h = harness({ loggedIn: true });
+  h.groups.enable(GROUP, "Grok bot test");
+  const linkMessage = (url: string) => h.groupText(5, `看 ${url}`, { entities: [{ type: "url", offset: 2, length: url.length }] });
+  const startedCards = () => h.calls.filter((c) => c.method === "sendChatAction").length;
+  await h.bot.handleUpdate(linkMessage("https://t.me/zaihuanews"));
+  await h.bot.handleUpdate(linkMessage("https://pornhub.com"));
+  await h.settle();
+  assert.equal(startedCards(), 0);
+  await h.bot.handleUpdate(linkMessage("https://example.com/article"));
+  await h.settle();
+  assert.equal(startedCards(), 1, "an ordinary link still gets a card");
+  h.groups.setHideAdult(GROUP, false);
+  await h.bot.handleUpdate(linkMessage("https://pornhub.com"));
+  await h.settle();
+  assert.equal(startedCards(), 2, "the owner can allow them");
+
+  const video = () => h.groupText(5, "", { text: undefined, video: { file_id: "vid", file_unique_id: "vid", duration: 30, width: 1, height: 1 } });
+  await h.bot.handleUpdate(h.groupText(OWNER, "/platforms off upload"));
+  await h.bot.handleUpdate(video());
+  await h.settle();
+  assert.equal(startedCards(), 2, "uploaded video ignored");
+  await h.bot.handleUpdate(h.groupText(OWNER, "/platforms on upload"));
+  await h.bot.handleUpdate(video());
+  await h.settle();
+  assert.equal(startedCards(), 3);
 });

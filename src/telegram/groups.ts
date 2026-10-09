@@ -222,6 +222,30 @@ export class GroupStore {
     this.#db.prepare("UPDATE groups SET confirm_actions = ? WHERE chat_id = ?").run(on ? 1 : 0, chatId);
   }
 
+  /** Skip link cards for adult sites (🔞, on unless the owner turns it off). */
+  hideAdult(chatId: number): boolean {
+    const row = this.#db.prepare("SELECT hide_adult FROM groups WHERE chat_id = ?").get(chatId) as { hide_adult: number } | undefined;
+    return row?.hide_adult !== 0;
+  }
+
+  setHideAdult(chatId: number, on: boolean): void {
+    this.#db.prepare("UPDATE groups SET hide_adult = ? WHERE chat_id = ?").run(on ? 1 : 0, chatId);
+  }
+
+  /**
+   * Remember which of the bot's messages were posted automatically (link cards, video cards,
+   * voice transcripts): a reply to one is a comment about it, not a question to the bot.
+   * Only message ids are kept (for a week), so this also works in strict groups.
+   */
+  markAuto(chatId: number, messageIds: readonly number[], now = Date.now()): void {
+    const insert = this.#db.prepare("INSERT OR IGNORE INTO auto_posts (chat_id, message_id, at) VALUES (?, ?, ?)");
+    for (const id of messageIds) insert.run(chatId, id, now);
+  }
+
+  isAuto(chatId: number, messageId: number): boolean {
+    return this.#db.prepare("SELECT 1 FROM auto_posts WHERE chat_id = ? AND message_id = ?").get(chatId, messageId) !== undefined;
+  }
+
   /** Whether voice notes are transcribed automatically in this group. */
   voiceMode(chatId: number): VoiceMode {
     const row = this.#db.prepare("SELECT voice_mode FROM groups WHERE chat_id = ?").get(chatId) as { voice_mode: string } | undefined;
@@ -282,6 +306,7 @@ export class GroupStore {
 
   prune(now = Date.now()): void {
     this.#db.prepare("DELETE FROM group_log WHERE at < ?").run(now - LOG_RETENTION_MS);
+    this.#db.prepare("DELETE FROM auto_posts WHERE at < ?").run(now - LOG_RETENTION_MS);
   }
 }
 
@@ -328,11 +353,13 @@ export function linksIn(message: TgMessage): string[] {
 const NAME_TRIGGER = /^\s*(?:(?:hey|hi)\s+grok\b[\s,:，：!！?？]*|grok(?:\s*[,:，：!！?？。]+\s*|\s+(?=[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af])|\s*$))/i;
 
 /**
- * Whether a group message is addressed to the bot: an @mention, a reply to
- * one of its messages, or starting with its name.
+ * Whether a group message is addressed to the bot: an @mention, starting with its name, or a
+ * reply to one of its messages. A reply to something it posted automatically (`isAuto`: link
+ * cards, transcripts) is people talking about that content, so it counts only with the name or a mention.
  */
-export function isAddressedToBot(message: TgMessage, bot: Bot): boolean {
-  if (message.reply_to_message?.from?.id === bot.id) return true;
+export function isAddressedToBot(message: TgMessage, bot: Bot, isAuto: (messageId: number) => boolean = () => false): boolean {
+  const replied = message.reply_to_message;
+  if (replied?.from?.id === bot.id && !isAuto(replied.message_id)) return true;
   const text = message.text ?? message.caption ?? "";
   const entities = (message.entities ?? message.caption_entities ?? []) as (Entity & { user?: TgUser })[];
   for (const entity of entities) {
@@ -370,6 +397,7 @@ export const PLATFORMS: Record<string, string> = {
   pipix: "皮皮虾 Pipix",
   coolapk: "酷安 Coolapk",
   snapchat: "Snapchat",
+  upload: "Videos uploaded to the group",
 };
 
 /** True when a message is only links (plus whitespace), so deleting it loses nothing once cards are posted. */

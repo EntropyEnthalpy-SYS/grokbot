@@ -131,6 +131,10 @@ export function openDbAt(path: string): Db {
   addColumnIfMissing(db, "reminders", "retry_at", "INTEGER");
   addColumnIfMissing(db, "reminders", "attempts", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "reminders", "last_error", "TEXT");
+  // 🔞 Skip link cards for adult sites.
+  addColumnIfMissing(db, "groups", "hide_adult", "INTEGER NOT NULL DEFAULT 1");
+  // Message ids of the bot's automatic posts (cards, transcripts): replies to them aren't questions. Ids only.
+  db.exec("CREATE TABLE IF NOT EXISTS auto_posts (chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (chat_id, message_id))");
   migrateTrusted(db);
   return db;
 }
