@@ -53,6 +53,16 @@ test("quoted posts and video thumbnails are included, images capped at 4", () =>
   assert.deepEqual(xPostImageUrls(post).map((u) => u.split("/").pop()), ["p1.jpg", "p2.jpg", "p3.jpg", "q.jpg"]);
 });
 
+test("an X Article (a post that is only a link) shows the article's title and opening lines", () => {
+  const post = parseFx({
+    text: "look",
+    author: { screen_name: "a" },
+    quote: { raw_text: { text: "https://t.co/abc123" }, author: { screen_name: "a" }, article: { title: "How to Build a Coding Agent", preview_text: "Your agent pays frontier prices." } },
+  });
+  assert.equal(post.quote!.text, "📄 How to Build a Coding Agent\nYour agent pays frontier prices.");
+  assert.equal(post.text, "look");
+});
+
 test("falls back to X's embed CDN when fxtwitter fails", async () => {
   const urls: string[] = [];
   const impl = (async (input: string | URL | Request) => {

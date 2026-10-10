@@ -100,7 +100,7 @@ export function parseFx(tweet: Json): XPost {
     verified: Boolean(tweet.author?.verification?.verified ?? tweet.author?.verified),
     createdAt: tweet.created_at,
     lang: tweet.lang ?? undefined,
-    text: stripMediaLink(String(tweet.raw_text?.text ?? tweet.text ?? "")),
+    text: [stripMediaLink(String(tweet.raw_text?.text ?? tweet.text ?? "")), articleText(tweet.article)].filter(Boolean).join("\n\n"),
     translation: translation ? stripMediaLink(translation) : undefined,
     photos: (media.photos ?? []).map((photo: Json) => String(photo.url)).filter(Boolean),
     videos,
@@ -147,6 +147,14 @@ export function parseSyndication(tweet: Json): XPost {
     videoThumbnails: videos.map((video) => video.thumbnail).filter(Boolean),
     quote: tweet.quoted_tweet ? parseSyndication(tweet.quoted_tweet) : undefined,
   };
+}
+
+/** An X Article's post is only a link; show the article's title and opening lines instead. */
+function articleText(article: Json | undefined): string {
+  const title = String(article?.title ?? "").trim();
+  if (!title) return "";
+  const preview = String(article?.preview_text ?? "").trim();
+  return [`📄 ${title}`, preview.length > 280 ? `${preview.slice(0, 279).trimEnd()}…` : preview].filter(Boolean).join("\n");
 }
 
 function sizeOf(media: Json | undefined): XPost["mediaSize"] {
