@@ -20,14 +20,14 @@ import type { Message } from "grammy/types";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { TurnCancelledError, type ChatSessions } from "../agent/sessions.ts";
 import { assistantText, CHAT_PROVIDERS, errorMessage, ROUTES, type Grok, type ProbeResult, type Route } from "../grok/grok.ts";
-import { isAdultUrl, isTelegramLink, linkKind } from "../links/detect.ts";
+import { extractLinks, isAdultUrl, isTelegramLink, linkKind } from "../links/detect.ts";
 import { untrusted } from "../links/reader.ts";
 import { summarizeLink, videoCardFromInfo, type LinkSummaryDeps } from "../links/summarize.ts";
 import type { VideoReader } from "../media/video.ts";
 import type { ParseHubClient } from "../links/parsehub.ts";
 import type { UploadLimits } from "../links/phcard.ts";
 import { sendPostCard, type PostCardDeps } from "../links/postcard.ts";
-import { sendVideoLinkCard } from "../links/videocard.ts";
+import { sendPlainVideoCard } from "../links/videocard.ts";
 import type { CardCache } from "../links/cardCache.ts";
 import { inlineResults, urlFromQuery } from "./inline.ts";
 import { defaultLanguage } from "../lang.ts";
@@ -106,6 +106,8 @@ const KEEP_COMMANDS = new Set(["tr", "img", "remind", "enable", "start"]);
 /** Default question limits (the owner changes them in /admin → ⚖️ Limits). */
 export const QUESTIONS_PER_USER_PER_HOUR = LIMITS.questionsPerUserHour.default;
 export const QUESTIONS_PER_GROUP_PER_HOUR = LIMITS.questionsPerGroupHour.default;
+/** Callback data of the 📝 Summary button under video cards. */
+const SUMMARY_BUTTON = "vsum";
 /** A link reposted within this time after its card gets no second card. */
 const REPOST_WINDOW_MS = 6 * HOUR;
 /** Group answers Grok works on at once; more wait their turn. */
@@ -931,6 +933,48 @@ export function createBot({
   });
   bot.callbackQuery("rem:done", (ctx) => ctx.answerCallbackQuery());
 
+  // 📝 Summary under a video card: the AI watches the video and replies with a summary in the group's language.
+  // The video's link is read back from the card itself (its title), so nothing about the card is stored.
+  const summarizing = new Set<string>();
+  bot.callbackQuery(SUMMARY_BUTTON, async (ctx) => {
+    const card = ctx.callbackQuery.message;
+    const chatId = ctx.chat?.id;
+    if (!card || chatId === undefined || !("date" in card) || card.date === 0) return ctx.answerCallbackQuery({ text: "This card is too old." });
+    const url = extractLinks(card.caption ?? card.text, card.caption_entities ?? card.entities)[0];
+    const key = `${chatId}:${card.message_id}`;
+    if (!url) return ctx.answerCallbackQuery({ text: "No video link on this card." });
+    if (summarizing.has(key)) return ctx.answerCallbackQuery({ text: "Already summarizing…" });
+    if (!(await grok.isLoggedIn())) return ctx.answerCallbackQuery({ text: "The bot owner needs to log in first.", show_alert: true });
+    if (!mayAsk(ctx, chatId)) return ctx.answerCallbackQuery({ text: "You've reached your question limit for now. (/stats)", show_alert: true });
+    summarizing.add(key);
+    const threadId = card.message_thread_id && card.is_topic_message ? card.message_thread_id : 0;
+    const restore = { inline_keyboard: [[{ text: "📝 Summary", callback_data: SUMMARY_BUTTON }]] };
+    await ctx.answerCallbackQuery({ text: "📝 Watching the video… (about 15 s)" });
+    await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [[{ text: `📝 Summarizing for ${displayName(ctx.from).slice(0, 30)}…`, callback_data: "rem:done" }]] } }).catch(() => undefined);
+    const typing = keepTyping(ctx, threadId);
+    try {
+      const summary = await summarizeLink(links, url, groups.language(chatId));
+      const ids = await new ReplyStreamer(bot.api, chatId, { replyTo: card.message_id, threadId }).finish(summary);
+      answered(chatId, ids);
+      logBotMessage(ctx, chatId, threadId, ids[0], `[summary of ${url}]\n${summary}`);
+      usage.record(chatId, who(ctx), "card");
+      await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => undefined);
+    } catch (error) {
+      console.warn(`summary failed for ${url}: ${errorMessage(error)}`);
+      health?.recordError(error);
+      await ctx.editMessageReplyMarkup({ reply_markup: restore }).catch(() => undefined);
+      await bot.api
+        .sendMessage(chatId, `⚠️ ${friendlyError(errorMessage(error), grok.route, isOwner(ctx))}`, {
+          reply_parameters: { message_id: card.message_id, allow_sending_without_reply: true },
+          ...(threadId ? { message_thread_id: threadId } : {}),
+        })
+        .catch(() => undefined);
+    } finally {
+      typing.stop();
+      summarizing.delete(key);
+    }
+  });
+
   bot.command("tz", (ctx) => {
     const chatId = ctx.chat.id;
     const arg = ctx.match.trim();
@@ -1087,7 +1131,13 @@ export function createBot({
     }
     // Telegram channel/group links (forwarded posts' footers) aren't content; adult sites are skipped unless the owner allows them.
     const hideAdult = groups.hideAdult(chatId);
-    const found = linksIn(message).filter((url) => !isTelegramLink(url) && !(hideAdult && isAdultUrl(url)) && !recentlyCarded(chatId, url));
+    const cardable = linksIn(message).filter((url) => !isTelegramLink(url) && !(hideAdult && isAdultUrl(url)));
+    const found = cardable.filter((url) => !recentlyCarded(chatId, url));
+    // Only links that already have a card above: a 👌 reaction instead of a second card, so it doesn't look ignored.
+    if (auto && cardable.length > 0 && found.length === 0) {
+      void ctx.react("👌").catch((error) => console.warn(`repost reaction failed: ${errorMessage(error)}`));
+      return;
+    }
     if (found.length > 0 && auto && autoCards.take(String(chatId))) {
       for (const url of found) cardedAt.set(`${chatId} ${url}`, Date.now());
       background(ctx, () => autoJobs.use(() => showLinkContent(ctx, message, found, threadId)), { quiet: true });
@@ -1280,20 +1330,23 @@ export function createBot({
             }
           }
           const fallbackPlatform = isYouTube(url) ? "youtube" : linkKind(url) === "video" ? "video" : "web";
-          if (!allowed(fallbackPlatform) || !(await grok.isLoggedIn())) continue;
+          if (!allowed(fallbackPlatform)) continue;
           if (fallbackPlatform !== "web") {
-            // YouTube & co.: the video itself with the 🎬 card as caption.
-            const sent = await sendVideoLinkCard(
-              { links, api: bot.api, limits: links.uploadLimits, cache: links.cache, mediaDir: links.mediaDir },
+            // YouTube & co., like a parse bot: the video with its title and description, no AI. 📝 Summary on request.
+            const sent = await sendPlainVideoCard(
+              { video: links.video, api: bot.api, limits: links.uploadLimits, cache: links.cache, mediaDir: links.mediaDir },
               chatId,
               url,
-              lang,
               replyOptions,
             );
+            await bot.api
+              .editMessageReplyMarkup(chatId, sent.ids[0]!, { reply_markup: { inline_keyboard: [[{ text: "📝 Summary", callback_data: SUMMARY_BUTTON }]] } })
+              .catch((error) => console.warn(`summary button not added: ${errorMessage(error)}`));
             autoPost(ctx, chatId, threadId, sent.ids, `[content of ${url}]\n${sent.plain}`);
             shown++;
             continue;
           }
+          if (!(await grok.isLoggedIn())) continue;
           webCards.push({ url, card: await summarizeLink(links, url, lang) });
         } catch (error) {
           console.warn(`link content failed for ${url}: ${errorMessage(error)}`);

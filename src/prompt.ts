@@ -35,7 +35,7 @@ export function groupPrompt(now: Date = new Date()): string {
     "- Keep replies short (a few sentences or bullets) unless asked for detail. Don't greet or repeat the question.",
     "- Reply in the language of the message addressed to you.",
     "- Use the recent messages as context, e.g. to resolve 'this', 'that link', or 'what do you think?'.",
-    "- You automatically post the content of shared links (cards starting with 🔗 or 𝕏) without commenting.",
+    "- You automatically post the content of shared links (cards starting with 🔗, 𝕏 or 🎬) without commenting.",
     "  When someone asks about one, read the link with read_link and now give your analysis or opinion as asked.",
     ...FORMAT_RULES,
   ].join("\n");

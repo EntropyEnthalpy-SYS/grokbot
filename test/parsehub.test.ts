@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,7 +8,7 @@ import { removeOldFiles, removeStaleMedia } from "../src/media/cleanup.ts";
 import { openDbAt } from "../src/db.ts";
 import { CardCache } from "../src/links/cardCache.ts";
 import { isOnlyLinks } from "../src/telegram/groups.ts";
-import { cardFromMarkdown } from "../src/links/videocard.ts";
+import { plainVideoCard } from "../src/links/videocard.ts";
 import { buildPostCard, CLOUD_LIMITS, isJpegOrPng, photoParts, prepareMedia, prepareVideo } from "../src/links/phcard.ts";
 import { normalizeFile, ParseHubClient, type PhDownload, type PhPost } from "../src/links/parsehub.ts";
 import { sendPostCard } from "../src/links/postcard.ts";
@@ -242,12 +242,50 @@ test("local videos get a streamable copy, a thumbnail, and their size and durati
   assert.ok(bytes.indexOf("moov") < bytes.indexOf("mdat"), "moov atom first");
 });
 
-test("video card: short cards are the whole caption; long ones show the title and fold the rest", () => {
-  const short = cardFromMarkdown("🎬 **美麗的中國女孩**\nMin Min · 0:07\n- 影片沒有語音", []);
-  assert.equal(short.captionHtml, "🎬 <b>美麗的中國女孩</b>\nMin Min · 0:07\n• 影片沒有語音");
-  assert.equal(short.clipped, false);
-  const long = cardFromMarkdown(`🎬 **Title**\n${"- point\n".repeat(200)}`, []);
-  assert.equal(long.captionHtml, "🎬 <b>Title</b>");
-  assert.equal(long.clipped, true);
-  assert.match(long.fullTextHtml, /^<blockquote expandable>• point/);
+test("plain video card: linked title, channel and length, the start of the description; always fits a caption", () => {
+  const card = plainVideoCard(
+    "https://www.youtube.com/watch?v=abc&x=<1>",
+    { title: "Rock & <Roll>", uploader: "Hill Studio", durationSec: 3725, description: "First line\nhttps://spam.example/link\n#tag #tag2\n\nSecond line" },
+    [],
+  );
+  assert.equal(card.captionHtml, '🎬 <a href="https://www.youtube.com/watch?v=abc&amp;x=&lt;1&gt;"><b>Rock &amp; &lt;Roll&gt;</b></a>\nHill Studio · 1:02:05\n<blockquote expandable>First line\nSecond line</blockquote>');
+  assert.equal(card.clipped, false);
+  const long = plainVideoCard("https://youtu.be/x", { title: "T".repeat(300), durationSec: 7, description: "d".repeat(5000) }, []);
+  assert.ok(long.plain.length <= 1024, `caption is ${long.plain.length} characters`);
+  assert.match(long.plain, /^🎬 T{200}\n0:07\n\nd+…$/);
+  assert.equal(plainVideoCard("https://youtu.be/x", {}, []).plain, "🎬 Video", "no metadata: still a card");
+  assert.equal(plainVideoCard("https://youtu.be/x", { title: "Beautiful Chinese Girls #chinesefashion #shorts #model" }, []).plain, "🎬 Beautiful Chinese Girls");
+  assert.equal(plainVideoCard("https://youtu.be/x", { title: "#shorts #funny" }, []).plain, "🎬 #shorts #funny", "only hashtags: kept");
+  assert.equal(plainVideoCard("https://youtu.be/x", { title: "C# tutorial #1 for beginners" }, []).plain, "🎬 C# tutorial #1 for beginners", "hashtags inside the title stay");
+});
+
+import { sendPlainVideoCard } from "../src/links/videocard.ts";
+
+test("plain video card: the download starts with the lookup and is cancelled for long videos, which show their thumbnail", async () => {
+  const mediaDir = mkdtempSync(join(tmpdir(), "vc-"));
+  let aborted = false;
+  const sent: { method: string; media: string }[] = [];
+  const api = {
+    sendPhoto: async (_chat: number, photo: string) => (sent.push({ method: "sendPhoto", media: photo }), { message_id: 7 }),
+    sendVideo: async () => assert.fail("a 1-hour video is not posted"),
+    sendMessage: async () => ({ message_id: 8 }),
+    sendMediaGroup: async () => [],
+  };
+  const video = {
+    // Resolves only when cancelled, like yt-dlp stopped mid-download.
+    downloadVideo: (_url: string, _dir: string, _max: number, signal: AbortSignal) =>
+      new Promise((resolve) => signal.addEventListener("abort", () => ((aborted = true), resolve(undefined)))),
+    metadata: async () => ({ title: "Lecture", durationSec: 3600, thumbnail: "https://i.ytimg.com/vi/x/hq.jpg", isLive: false }),
+  };
+  const result = await sendPlainVideoCard({ video: video as never, api: api as never, limits: { photoBytes: 1, videoBytes: 1 }, mediaDir }, -1, "https://youtu.be/x", {});
+  assert.equal(aborted, true);
+  assert.deepEqual(sent, [{ method: "sendPhoto", media: "https://i.ytimg.com/vi/x/hq.jpg" }]);
+  assert.match(result.plain, /^🎬 Lecture\n1:00:00/);
+  assert.deepEqual(readdirSync(mediaDir), [], "the download folder is removed");
+
+  // A live stream gets no card, and its download is stopped too.
+  aborted = false;
+  const live = { ...video, metadata: async () => ({ title: "Live", isLive: true }) };
+  await assert.rejects(sendPlainVideoCard({ video: live as never, api: api as never, limits: { photoBytes: 1, videoBytes: 1 }, mediaDir }, -1, "https://youtu.be/y", {}), /live streams/);
+  assert.equal(aborted, true);
 });

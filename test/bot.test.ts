@@ -34,6 +34,8 @@ function harness(
     files?: Record<string, string>;
     /** Telegram refuses ephemeral messages (bot is not an admin). */
     refuseEphemeral?: boolean;
+    /** The video reader (YouTube cards and summaries). */
+    video?: Record<string, unknown>;
     /** Each message the bot sends gets its own id (default: all are message 1). */
     distinctIds?: boolean;
     /** The chat agent's turn: may call the create_image tool like Grok would. */
@@ -103,7 +105,15 @@ function harness(
     polls,
     actions,
     apiRoot: "http://127.0.0.1:1", // "local Bot API": getFile returns a path on disk
-    links: { cache: { get: () => undefined }, video: {} } as never,
+    links: {
+      db,
+      grok,
+      reader: {},
+      cache: { get: () => undefined, put: () => undefined },
+      video: options.video ?? {},
+      uploadLimits: { photoBytes: 10 * 1024 * 1024, videoBytes: 50 * 1024 * 1024 },
+      mediaDir: mkdtempSync(join(tmpdir(), "media-")),
+    } as never,
   });
   bot.botInfo = {
     id: 999,
@@ -887,6 +897,9 @@ test("no cards for t.me links or adult sites (unless the owner shows them); /pla
   await h.bot.handleUpdate(linkMessage("https://example.com/article"));
   await h.settle();
   assert.equal(startedCards(), 1, "the same link reposted soon after gets no second card");
+  const reaction = h.calls.find((c) => c.method === "setMessageReaction");
+  assert.deepEqual(reaction?.payload.reaction, [{ type: "emoji", emoji: "👌" }], "the repost gets a 👌 instead, so it doesn't look ignored");
+  assert.equal(h.calls.filter((c) => c.method === "setMessageReaction").length, 1, "only the repost, not the t.me or adult links");
   h.groups.setHideAdult(GROUP, false);
   await h.bot.handleUpdate(linkMessage("https://pornhub.com"));
   await h.settle();
@@ -901,4 +914,59 @@ test("no cards for t.me links or adult sites (unless the owner shows them); /pla
   await h.bot.handleUpdate(video());
   await h.settle();
   assert.equal(startedCards(), 3);
+});
+
+test("a YouTube link gets a plain card (no AI) with 📝 Summary; a tap adds the summary once and counts against the tapper's limit", async () => {
+  const metadataCalls: string[] = [];
+  const video = {
+    metadata: async (url: string) => (metadataCalls.push(url), { title: "山间日出", uploader: "Hill Studio", durationSec: 11, description: "日出延时", thumbnail: "https://i.ytimg.com/vi/x/hq.jpg", isLive: false }),
+    downloadVideo: async () => undefined,
+    watchUrl: async (url: string) => ({ url, title: "山间日出", uploader: "Hill Studio", durationSec: 11, transcriptSource: "subtitles", transcript: "[00:01] 你好", frames: [] }),
+  };
+  const h = harness({ loggedIn: true, video, distinctIds: true, ask: () => "🎬 **山间日出**\n- 山顶的日出" });
+  h.groups.enable(GROUP, "Grok bot test");
+  const url = "https://youtube.com/shorts/aBcDeFgHiJk";
+  await h.bot.handleUpdate(h.groupText(5, url, { entities: [{ type: "url", offset: 0, length: url.length }] }));
+  await h.until((c) => c.method === "editMessageReplyMarkup");
+  assert.deepEqual(h.asked, [], "no AI for the card");
+  const card = h.calls.find((c) => c.method === "sendPhoto")!;
+  assert.match(String(card.payload.caption), /^🎬 <a href="https:\/\/youtube\.com\/shorts\/aBcDeFgHiJk"><b>山间日出<\/b><\/a>\nHill Studio · 0:11/);
+  const button = h.calls.find((c) => c.method === "editMessageReplyMarkup")!;
+  assert.equal(button.payload.message_id, card.sentId);
+  assert.match(JSON.stringify(button.payload.reply_markup), /📝 Summary.*vsum/);
+
+  // Someone taps 📝 Summary. The link is read back from the card's title.
+  const tap = (from: number) =>
+    ({
+      update_id: h.next(),
+      callback_query: {
+        id: String(h.next()),
+        from: { id: from, is_bot: false, first_name: `user${from}` },
+        chat_instance: "c",
+        data: "vsum",
+        message: {
+          message_id: card.sentId!,
+          date: 1,
+          chat: { id: GROUP, type: "supergroup" },
+          from: { id: 999, is_bot: true, first_name: "Grokky" },
+          photo: [{ file_id: "p", file_unique_id: "p", width: 1, height: 1 }],
+          caption: "🎬 山间日出\nHill Studio · 0:11",
+          caption_entities: [{ type: "text_link", offset: 3, length: 7, url }],
+        },
+      },
+    }) as Update;
+  h.limits.set("questionsPerUserHour", 1);
+  await h.bot.handleUpdate(tap(6));
+  await h.until((c) => c.method === "sendMessage" && String(c.payload.text).includes("山顶的日出"));
+  assert.equal(h.asked.length, 1, "the AI is asked only now");
+  const summary = h.calls.find((c) => c.method === "sendMessage" && String(c.payload.text).includes("山顶的日出"))!;
+  assert.equal((summary.payload.reply_parameters as { message_id: number }).message_id, card.sentId, "posted as a reply to the card");
+  assert.equal(JSON.stringify(h.calls.filter((c) => c.method === "editMessageReplyMarkup").at(-1)!.payload.reply_markup), '{"inline_keyboard":[]}', "button removed");
+  assert.equal(h.groups.isAnswer(GROUP, summary.sentId!, Date.now()), true, "replies to the summary continue the conversation");
+
+  // Same person again: over their limit (1 per hour), refused without asking the AI.
+  await h.bot.handleUpdate(tap(6));
+  assert.match(JSON.stringify(h.calls.at(-1)!.payload), /question limit/);
+  assert.equal(h.asked.length, 1);
+  assert.deepEqual(metadataCalls, [url]);
 });

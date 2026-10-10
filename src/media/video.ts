@@ -123,6 +123,20 @@ export class VideoReader {
     );
   }
 
+  /** Title, channel, length, description and thumbnail of a video link, without subtitles or speech (one quick yt-dlp call). */
+  async metadata(url: string, signal?: AbortSignal): Promise<VideoMetadata> {
+    const { stdout } = await run(this.#ytdlp, [...this.#ytArgs(url), "-J", "--no-warnings", "--no-playlist", "--", url], { timeoutMs: 60_000, signal });
+    const meta = JSON.parse(stdout) as YtInfo;
+    return {
+      title: meta.title,
+      uploader: meta.uploader ?? meta.channel,
+      durationSec: meta.duration,
+      description: meta.description,
+      thumbnail: meta.thumbnail,
+      isLive: meta.is_live ?? false,
+    };
+  }
+
   /**
    * Download a video link as one H.264/AAC MP4 Telegram can play: best quality
    * up to 1080p on the short side (works for vertical Shorts), within `maxBytes`.
@@ -349,7 +363,17 @@ export class VideoReader {
   }
 }
 
+export interface VideoMetadata {
+  title?: string;
+  uploader?: string;
+  durationSec?: number;
+  description?: string;
+  thumbnail?: string;
+  isLive: boolean;
+}
+
 interface YtInfo {
+  thumbnail?: string;
   title?: string;
   uploader?: string;
   channel?: string;
