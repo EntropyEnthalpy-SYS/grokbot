@@ -84,13 +84,20 @@ export class OpsClient {
  * A copy of the database for the owner, without logins and API keys (those stay
  * on the server). Returns the copy's path; the caller deletes it after sending.
  */
-export function backupWithoutSecrets(db: Db, dir: string): string {
+/**
+ * A copy of the database without logins and API keys. `withoutHistory` (the nightly off-server
+ * copy) also leaves out conversations, the group log and cached pages, so stored messages still
+ * disappear after 7 days; notes, reminders, settings, permissions and usage are kept.
+ */
+export function backupWithoutSecrets(db: Db, dir: string, options: { withoutHistory?: boolean } = {}): string {
   const path = join(dir, `grokbot-backup-${new Date().toISOString().slice(0, 10)}-${randomBytes(3).toString("hex")}.db`);
   // VACUUM INTO takes a string literal; the path is built from the data dir, a date and hex only.
   db.exec(`VACUUM INTO '${path.replace(/'/g, "''")}'`);
   const copy = new DatabaseSync(path);
   try {
-    copy.exec("DELETE FROM credentials; DELETE FROM settings WHERE key = 'device_id'; VACUUM;");
+    copy.exec("DELETE FROM credentials; DELETE FROM settings WHERE key = 'device_id';");
+    if (options.withoutHistory) copy.exec("DELETE FROM chats; DELETE FROM group_log; DELETE FROM bot_answers; DELETE FROM link_cache;");
+    copy.exec("VACUUM;");
   } finally {
     copy.close();
   }

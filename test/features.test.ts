@@ -251,3 +251,17 @@ test("site cookies: a pasted header is cleaned and stored privately; junk is ref
   cookies.clear("zhihu");
   assert.equal(cookies.has("zhihu"), false);
 });
+
+test("the nightly off-server copy also leaves out conversations, the group log and cached pages; notes and reminders stay", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bak-"));
+  const db = openDbAt(join(dir, "live.db"));
+  db.prepare("INSERT INTO credentials (provider_id, json, updated_at) VALUES ('xai', '{}', 1)").run();
+  db.prepare("INSERT INTO chats (chat_key, messages, updated_at) VALUES ('tg:-1', '[\"secret talk\"]', 1)").run();
+  db.prepare("INSERT INTO group_log (chat_id, message_id, name, text, at) VALUES (-1, 1, 'A', 'secret talk', 1)").run();
+  db.prepare("INSERT INTO group_memory (chat_id, text, user_name, created_at) VALUES (-1, '小明吃素', 'A', 1)").run();
+  db.prepare("INSERT INTO reminders (chat_id, user_name, text, due_at, created_at) VALUES (-1, 'A', '开会', 1, 1)").run();
+  const copy = new DatabaseSync(backupWithoutSecrets(db, dir, { withoutHistory: true }));
+  const count = (table: string) => (copy.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+  assert.deepEqual([count("credentials"), count("chats"), count("group_log"), count("group_memory"), count("reminders")], [0, 0, 0, 1, 1]);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM chats").get() as { n: number }).n, 1, "the live database is untouched");
+});

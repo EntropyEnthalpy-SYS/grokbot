@@ -2,7 +2,7 @@ import { bilibiliDownloader, createApp } from "./app.ts";
 import { loadConfig, loadDotEnv } from "./config.ts";
 import { createBot, registerCommands, reminderKeyboard, renderReminder } from "./telegram/bot.ts";
 import { deliverDueReminders, ReminderStore } from "./reminders.ts";
-import { diskCheck, HealthMonitor, memoryCheck, socksCheck, ytdlpAgeCheck, type Check } from "./health.ts";
+import { backupCheck, diskCheck, HealthMonitor, memoryCheck, networkCheck, socksCheck, ytdlpAgeCheck, type Check } from "./health.ts";
 import { run } from "./media/run.ts";
 import { UsageStore } from "./usage.ts";
 import { setTimeZone } from "./time.ts";
@@ -12,7 +12,7 @@ import { CookieStore } from "./links/cookies.ts";
 import { backupWithoutSecrets, OpsClient } from "./ops.ts";
 import { SCHEDULED_POST_PROMPT, type Reminder } from "./reminders.ts";
 import { markdownToTelegramHtml, splitMarkdown, escapeHtml } from "./telegram/format.ts";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { removeOldFiles, removeStaleMedia } from "./media/cleanup.ts";
 import { CardCache } from "./links/cardCache.ts";
 
@@ -56,6 +56,12 @@ const checks: Check[] = [
     },
   },
   { name: "Disk", run: () => diskCheck(config.dataDir) },
+  // Lost packets make connections slow or fail: measured to xAI and Telegram every 15 min.
+  {
+    name: "Network",
+    everyMs: 15 * 60_000,
+    run: (signal) => networkCheck([{ name: "xAI", host: "api.x.ai" }, { name: "Telegram", host: "api.telegram.org" }], { signal }),
+  },
   { name: "Memory", everyMs: 60_000, run: async () => memoryCheck() },
 ];
 if (config.parsehubUrl) {
@@ -67,6 +73,10 @@ if (config.parsehubUrl) {
       return "helper up";
     },
   });
+}
+// The nightly copy to a second server (deploy/grokbot-backup.sh), when it is set up.
+if (existsSync(`${config.dataDir}/backup-status.json`)) {
+  checks.push({ name: "Off-server backup", everyMs: 60 * 60_000, run: () => backupCheck(`${config.dataDir}/backup-status.json`) });
 }
 if (config.ytdlpProxy?.startsWith("socks5")) checks.push({ name: "Tunnel (Bilibili)", run: (signal) => socksCheck(config.ytdlpProxy!, signal) });
 checks.push({

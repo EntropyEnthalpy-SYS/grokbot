@@ -67,3 +67,18 @@ Its SSH key on the bot server may only print the heartbeat (`restrict,command=�
 - **AI providers**: `/login` (Grok) or `/admin → 🤖 AI providers` (Grok, ChatGPT, Claude). Logins live in the SQLite database.
 - **Site cookies** for Instagram, Threads and Zhihu: `/admin → 🛠 Maintenance → 🍪 Site cookies` (stored in `/var/lib/grokbot/parsehub-cookies.json`, mode 600).
 - **Backups**: `/admin → 🛠 Maintenance → 💾 Backup` sends you the database without logins and API keys. For a full backup, copy `/var/lib/grokbot/grokbot.db` yourself.
+
+## 7. Optional: nightly backup to a second server
+
+```bash
+deploy/deploy-backup.sh root@second-server root@bot-server
+```
+
+Every night at 04:00 Taipei time the bot server copies the database to the second server, without logins, API keys, conversations, the group log or cached pages (so stored messages still disappear after 7 days). The second server keeps the newest 14 copies in `/var/lib/grokbot-backup/backups/`. The key used for this can only hand over one SQLite file there: no shell, no reading files back. `/health` shows when the last copy arrived and alerts if it fails.
+
+## 8. Moving to a new server
+
+1. On the new server: Node 24, `deploy/deploy.sh`, and (if used) the local Bot API binary, `/etc/grokbot-tunnel/` and `/etc/grokbot-parsehub.json`.
+2. On the old server: stop and disable `grokbot`, `grokbot-watchdog.timer` and `grokbot-ops.path` (the watchdog would restart the bot), then call `close` on the local Bot API server so the bot can log in elsewhere, and stop `telegram-bot-api`.
+3. Copy `/etc/grokbot.env` and `/var/lib/grokbot/grokbot.db` (with the service stopped) to the new server, run `deploy/deploy.sh` again, and enable `grokbot-watchdog.timer`.
+4. Point the sentinel and the backup at the new server (`deploy/deploy-sentinel.sh`, `deploy/deploy-backup.sh`).

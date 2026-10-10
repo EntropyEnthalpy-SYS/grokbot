@@ -59,6 +59,12 @@ if [ -f /etc/grokbot-tunnel/env ]; then
   install -m 644 /opt/grokbot/deploy/grokbot-tunnel.service /etc/systemd/system/grokbot-tunnel.service
 fi
 
+# Nightly off-server backup (only once deploy/deploy-backup.sh has set it up).
+if [ -f /etc/grokbot-backup/env ]; then
+  install -m 644 /opt/grokbot/deploy/grokbot-backup.service /etc/systemd/system/grokbot-backup.service
+  install -m 644 /opt/grokbot/deploy/grokbot-backup.timer /etc/systemd/system/grokbot-backup.timer
+fi
+
 # Local Bot API server (only once it has been built and API credentials exist).
 if [ -x /usr/local/bin/telegram-bot-api ] && grep -qE '^TELEGRAM_API_ID=[0-9]+' /etc/grokbot.env; then
   install -d -o grokbot -g grokbot -m 700 /var/lib/grokbot/tgapi /var/lib/grokbot/tgapi-tmp

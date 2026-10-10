@@ -1,4 +1,4 @@
-import { rename, statfs, writeFile } from "node:fs/promises";
+import { readFile, rename, statfs, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 
 /** A health check: resolves with a short detail when healthy, throws when not. */
@@ -174,6 +174,75 @@ export function socksCheck(proxyUrl: string, signal?: AbortSignal): Promise<stri
     });
     socket.once("error", (error) => reject(new Error(`tunnel down: ${error.message}`)));
   });
+}
+
+/** Time to open one TCP connection, in ms; rejects when it fails or takes longer than `timeoutMs`. */
+export type ConnectTimer = (host: string, port: number, timeoutMs: number, signal?: AbortSignal) => Promise<number>;
+
+const tcpConnectTime: ConnectTimer = (host, port, timeoutMs, signal) =>
+  new Promise((resolve, reject) => {
+    const started = performance.now();
+    const socket = connect({ host, port, signal });
+    socket.setTimeout(timeoutMs, () => socket.destroy(new Error("timeout")));
+    socket.once("connect", () => {
+      resolve(performance.now() - started);
+      socket.destroy();
+    });
+    socket.once("error", reject);
+  });
+
+/**
+ * Network quality: opens `attempts` TCP connections to each target. A lost packet shows up as a
+ * slow connect (the first retry comes after ~1 s) or a failed one. Fails when more than
+ * `maxFailed` connections fail or more than `maxSlowShare` of them are slow, so a bad
+ * network is reported (and alerted after two bad runs in a row) before members notice.
+ */
+export async function networkCheck(
+  targets: readonly { name: string; host: string; port?: number }[],
+  options: { attempts?: number; slowMs?: number; timeoutMs?: number; maxFailed?: number; maxSlowShare?: number; signal?: AbortSignal; connectTime?: ConnectTimer } = {},
+): Promise<string> {
+  const { attempts = 15, slowMs = 900, timeoutMs = 3000, maxFailed = 1, maxSlowShare = 0.1, signal, connectTime = tcpConnectTime } = options;
+  const parts: string[] = [];
+  let failed = 0;
+  let slow = 0;
+  let total = 0;
+  await Promise.all(
+    targets.map(async (target) => {
+      const times: number[] = [];
+      // Five at a time, so even a bad network stays within the check's time limit.
+      for (let i = 0; i < attempts; i += 5) {
+        const batch = Array.from({ length: Math.min(5, attempts - i) }, () =>
+          connectTime(target.host, target.port ?? 443, timeoutMs, signal).then(
+            (ms) => void times.push(ms),
+            () => void failed++,
+          ),
+        );
+        await Promise.all(batch);
+      }
+      total += attempts;
+      slow += times.filter((ms) => ms > slowMs).length;
+      const sorted = [...times].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      parts.push(`${target.name} ${median === undefined ? "-" : `${Math.round(median)} ms`}`);
+    }),
+  );
+  const detail = `${total} connects: ${failed} failed, ${slow} slow (median ${parts.sort().join(", ")})`;
+  if (failed > maxFailed || slow > total * maxSlowShare) throw new Error(`unstable network: ${detail}`);
+  return detail;
+}
+
+/** The nightly off-server backup (deploy/grokbot-backup.sh) succeeded within `maxAgeMs`. */
+export async function backupCheck(statusPath: string, maxAgeMs = 30 * 60 * MINUTE, now = Date.now()): Promise<string> {
+  let status: { at?: number; ok?: boolean; detail?: string };
+  try {
+    status = JSON.parse(await readFile(statusPath, "utf8"));
+  } catch {
+    throw new Error("no off-server backup has run yet");
+  }
+  const age = Math.round((now - Number(status.at ?? 0)) / (60 * MINUTE));
+  if (!status.ok) throw new Error(`last backup failed ${age} h ago: ${status.detail ?? "unknown error"}`);
+  if (now - Number(status.at) > maxAgeMs) throw new Error(`last backup is ${age} h old; the nightly backup may be failing`);
+  return `${status.detail ?? "ok"}, ${age} h ago`;
 }
 
 /** yt-dlp versions are dates (2026.10.05). Releases can be ~3 months apart, so only a much older one means updates are failing. */
