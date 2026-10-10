@@ -271,6 +271,15 @@ export class GroupStore {
     this.#db.prepare("UPDATE groups SET voice_mode = ? WHERE chat_id = ?").run(mode, chatId);
   }
 
+  /** Whether the bot posted a card for `url` here since `since`; survives restarts (normal-privacy groups keep the log). */
+  cardedSince(chatId: number, url: string, since: number): boolean {
+    return (
+      this.#db
+        .prepare("SELECT 1 FROM group_log WHERE chat_id = ? AND is_bot = 1 AND at > ? AND instr(text, ?) = 1 LIMIT 1")
+        .get(chatId, since, `[content of ${url}]`) !== undefined
+    );
+  }
+
   log(chatId: number, threadId: number, entry: LogEntry): void {
     this.#db
       .prepare(
@@ -373,12 +382,21 @@ export function isJustReaction(message: TgMessage): boolean {
   return words === "" || REACTION_WORDS.test(words);
 }
 
-/** Bot is called by name at the start of a message: "grok, …", "hey grok …". */
 /**
- * "grok, …", "grok: …", "grok？", "grok 這是…" (CJK right after), or "hey/hi grok …".
- * Plain sentences that start with the word ("grok's answer was wrong", "grok is down") don't count.
+ * Bot called by name at the start of a message: "grok, …", "grok: …", "grok？", "grok 這是…" (CJK right
+ * after), or "hey/hi grok …".
  */
 const NAME_TRIGGER = /^\s*(?:(?:hey|hi)\s+grok\b[\s,:，：!！?？]*|grok(?:\s*[,:，：!！?？。]+\s*|\s+(?=[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af])|\s*$))/i;
+/** "grok what do you think?", "grok summarize https://…": the bare name counts with a question mark at the end or a link. */
+const NAME_WORD = /^\s*grok\s+/i;
+
+/**
+ * Whether the text starts by calling the bot by name. Plain remarks that start with the word
+ * ("grok's answer was wrong", "grok is down") don't count.
+ */
+function callsBotByName(text: string): boolean {
+  return NAME_TRIGGER.test(text) || (NAME_WORD.test(text) && (/[?？]\s*$/.test(text) || /https?:\/\//i.test(text)));
+}
 
 /**
  * Whether a group message is addressed to the bot: an @mention, starting with its name, or a
@@ -398,10 +416,9 @@ export function isAddressedToBot(message: TgMessage, bot: Bot, isAnswer: (messag
     }
     if (entity.type === "text_mention" && entity.user?.id === bot.id) return true;
   }
-  return NAME_TRIGGER.test(text);
+  return callsBotByName(text);
 }
 
-/** Whether text (e.g. a voice transcript) starts by calling the bot by name. */
 /** Platform ids /platforms understands, with display names. ParseHub ids plus our own handlers. */
 export const PLATFORMS: Record<string, string> = {
   twitter: "X / Twitter",
@@ -436,14 +453,16 @@ export function isOnlyLinks(text: string, urls: readonly string[]): boolean {
   return rest.replace(/https?:\/\/\S+/g, " ").trim() === "";
 }
 
+/** Whether text (e.g. a voice transcript) starts by calling the bot by name. */
 export function startsWithBotName(text: string): boolean {
-  return NAME_TRIGGER.test(text);
+  return callsBotByName(text);
 }
 
 /** Remove the bot's @username and a leading "grok," so Grok sees the actual question. */
 export function stripAddress(text: string, bot: Bot): string {
   const mention = new RegExp(`@${bot.username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi");
-  return text.replace(mention, " ").replace(NAME_TRIGGER, "").replace(/\s+/g, " ").trim();
+  const named = NAME_TRIGGER.test(text) ? text.replace(NAME_TRIGGER, "") : callsBotByName(text) ? text.replace(NAME_WORD, "") : text;
+  return named.replace(mention, " ").replace(/\s+/g, " ").trim();
 }
 
 /** The user message Grok receives for a group turn. */

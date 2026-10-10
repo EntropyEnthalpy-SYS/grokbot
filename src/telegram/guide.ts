@@ -11,7 +11,7 @@ export interface GuidePage {
 }
 
 const TALK = `<b>💬 Talking to the bot</b>
-In a group it stays quiet until addressed: <b>@mention</b> it, <b>reply</b> to one of its messages, or start with <b>grok,</b>
+In a group it stays quiet until addressed: <b>@mention</b> it, <b>reply</b> to one of its messages, or start with <b>grok,</b> (without the comma, end with a question mark or include a link: <code>grok what can I learn from https://… ?</code>)
 
 • <code>grok, 台北明天天氣？</code> → answer with web/X search
 • reply to a link: <code>grok, 重點是什麼？</code> → reads the link

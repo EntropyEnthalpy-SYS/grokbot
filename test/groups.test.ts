@@ -25,11 +25,29 @@ test("addressed by name only at the start of a message", () => {
   // Starting with the word is not enough: the name must be followed by punctuation, CJK text, or nothing.
   for (const text of ["grok 這是真的嗎", "Grok，幫我查", "grok?", "grok", "hi grok what is this"]) assert.equal(isAddressedToBot(msg({ text }), bot), true, text);
   for (const text of ["grok's answer was wrong", "grok is down again lol", "Grok 4.7 is out", "grokbot"]) assert.equal(isAddressedToBot(msg({ text }), bot), false, text);
+  // The bare name followed by words counts when the message ends with a question mark or carries a link.
+  for (const text of ["grok my site is example.org, check https://example.com/ could I learn?", "grok 4.7 or 4.6, which is better？", "grok summarize https://example.com/a"])
+    assert.equal(isAddressedToBot(msg({ text }), bot), true, text);
+  for (const text of ["grok is down? no, it's fine", "grok's link https://example.com is broken"]) assert.equal(isAddressedToBot(msg({ text }), bot), false, text);
 });
 
 test("stripAddress removes the mention and the name prefix", () => {
   assert.equal(stripAddress("@GrokTest_bot  is this true?", bot), "is this true?");
   assert.equal(stripAddress("grok, 這是真的嗎 @groktest_bot", bot), "這是真的嗎");
+  assert.equal(stripAddress("grok what can I learn here?", bot), "what can I learn here?");
+  assert.equal(stripAddress("grokking is fun @GrokTest_bot", bot), "grokking is fun");
+});
+
+test("cards posted in the group are remembered for reposts, also after a restart", () => {
+  const groups = new GroupStore(openDbAt(":memory:"));
+  const now = 2_000_000_000_000;
+  groups.log(-1, 0, { messageId: 7, name: "Bot", text: "[content of https://example.com/a]\n🔗 A", isBot: true, at: now - 3600_000 });
+  groups.log(-1, 0, { messageId: 8, name: "Amy", text: "[content of https://example.com/b]", isBot: false, at: now - 3600_000 });
+  assert.equal(groups.cardedSince(-1, "https://example.com/a", now - 6 * 3600_000), true);
+  assert.equal(groups.cardedSince(-1, "https://example.com/a", now - 1800_000), false, "older than the window");
+  assert.equal(groups.cardedSince(-2, "https://example.com/a", now - 6 * 3600_000), false, "another group");
+  assert.equal(groups.cardedSince(-1, "https://example.com/", now - 6 * 3600_000), false, "a different (shorter) link");
+  assert.equal(groups.cardedSince(-1, "https://example.com/b", now - 6 * 3600_000), false, "a person typing it isn't a card");
 });
 
 test("describeMessage covers media and reveals hidden link targets", () => {

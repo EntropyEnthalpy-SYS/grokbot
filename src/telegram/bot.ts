@@ -480,7 +480,7 @@ export function createBot({
       groups.enable(ctx.chat!.id, ctx.chat && "title" in ctx.chat ? ctx.chat.title : undefined);
       const lines = [
         "✅ Enabled in this group.",
-        "• Mention me, reply to me, or start with “grok,” to ask something.",
+        "• Mention me, reply to me, or start with “grok,” (or “grok … ?”) to ask something.",
         `• Links: <b>${groups.linkMode(ctx.chat!.id)}</b> — I show what links contain; I comment only when asked (/links auto|mention|off).`,
         `• Translation language: <b>${groups.language(ctx.chat!.id)}</b> (/lang).`,
         `• Privacy: <b>${groups.privacy(ctx.chat!.id)}</b> (/privacy).`,
@@ -1179,11 +1179,11 @@ export function createBot({
     }
   }
 
-  /** Links that got a card, per chat: a repost within REPOST_WINDOW_MS gets no second card. */
+  /** Links that got a card, per chat: a repost within REPOST_WINDOW_MS gets no second card (memory, then the group log after a restart). */
   const cardedAt = new Map<string, number>();
   function recentlyCarded(chatId: number, url: string, now = Date.now()): boolean {
     for (const [key, at] of cardedAt) if (now - at > REPOST_WINDOW_MS) cardedAt.delete(key);
-    return cardedAt.has(`${chatId} ${url}`);
+    return cardedAt.has(`${chatId} ${url}`) || groups.cardedSince(chatId, url, now - REPOST_WINDOW_MS);
   }
 
   /**
