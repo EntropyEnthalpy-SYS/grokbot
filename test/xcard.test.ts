@@ -103,34 +103,37 @@ test("when media fails entirely, the card is sent as text", async () => {
   assert.deepEqual(calls.map((c) => [c.method, c.replyTo]), [["sendMessage", 42]]);
 });
 
-test("too long for a caption: media + compact caption with folded text; full text follows only because it was clipped", async () => {
+test("too long for a caption: media + compact caption with the text clipped and folded; no second message repeats it", async () => {
   const { api, calls } = fakeApi();
   const card = buildXCard(post({ photos: ["https://pbs.twimg.com/a.jpg", "https://pbs.twimg.com/b.jpg"], text: "x".repeat(900) }), "y".repeat(400));
   assert.ok(card.plain.length > CAPTION_LIMIT);
   const { ids } = await sendXCard(api, -1, card, reply);
-  assert.deepEqual(calls.map((c) => c.method), ["sendMediaGroup", "sendMessage"]);
+  assert.deepEqual(calls.map((c) => c.method), ["sendMediaGroup"]);
   const caption = calls[0]!.caption!;
   assert.equal(caption, card.captionHtml);
   assert.ok(caption.replace(/<[^>]+>/g, "").length <= CAPTION_LIMIT, "caption fits Telegram's limit");
-  assert.match(caption, /^𝕏 <b>Deepanshu &lt;Sharma&gt;<\/b>[\s\S]*<blockquote expandable>x+…<\/blockquote>\n\n🌐 <blockquote expandable>y{400}<\/blockquote>$/);
-  assert.equal(calls[1]!.replyTo, 500);
-  assert.equal(calls[1]!.text, `<blockquote expandable>${"x".repeat(900)}</blockquote>\n\n🌐 <blockquote expandable>${"y".repeat(400)}</blockquote>`);
-  assert.deepEqual(ids, [500, 501, 502]);
+  assert.match(caption, /^𝕏 <b>Deepanshu &lt;Sharma&gt;<\/b>[^\n]*\n<blockquote expandable>x+…\n\n🌐 y{400}<\/blockquote>$/, "text and translation in one collapsed quote");
+  assert.deepEqual(ids, [500, 501]);
 });
 
 test("long but captionable posts send one message, no follow-up", async () => {
   const { api, calls } = fakeApi();
   const card = buildXCard(post({ text: "z".repeat(600) }), "w".repeat(300));
-  assert.equal(card.clipped, false);
   await sendXCard(api, -1, card, reply);
   assert.deepEqual(calls.map((c) => c.method), ["sendPhoto"]);
-  assert.match(calls[0]!.caption!, /<blockquote expandable>z{600}<\/blockquote>/);
+  assert.match(calls[0]!.caption!, /\n<blockquote expandable>z{600}\n\n🌐 w{300}<\/blockquote>$/);
+});
+
+test("a short post is folded too: media, author line, then one collapsed quote (Telegram shows its first lines)", () => {
+  const card = buildXCard(post({ text: "This is INSANE." }), "这太疯狂了。");
+  assert.match(card.captionHtml, /^𝕏 <b>Deepanshu &lt;Sharma&gt;<\/b>[^\n]*\n<blockquote expandable>This is INSANE\.\n\n🌐 这太疯狂了。<\/blockquote>$/);
+  assert.equal(card.html, card.captionHtml, "same layout when sent as text");
 });
 
 test("a very long post keeps up to 1800 characters of both text and translation, within one message", () => {
   const card = buildXCard(post({ text: "a".repeat(2500) }), "b".repeat(2500));
   assert.match(card.bodyPlain, new RegExp(`^a{1799}…\\n\\n🌐 b{1799}…$`));
-  assert.ok(card.fullTextHtml.length < 4096);
+  assert.ok(card.html.length < 4096);
 });
 
 test("text-only fallback keeps the header since there is no captioned media", async () => {

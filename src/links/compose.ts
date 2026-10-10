@@ -1,12 +1,12 @@
 import { escapeHtml, linkifyEscaped } from "../telegram/format.ts";
 
 /**
- * Card layout shared by X posts and ParseHub posts:
- *  - `captionHtml` fits Telegram's 1024-character media caption: long text is
- *    clipped and folded into an expandable quote (tap to open), like
- *    parse_hub_bot does.
- *  - `fullTextHtml` holds the untrimmed text and translation (each still in an
- *    expandable quote), sent as a reply only when the caption had to clip.
+ * Card layout shared by X posts and ParseHub posts, compact like parse_hub_bot:
+ * the media, the author line (and a title), then the text, translation and
+ * quoted post together in ONE collapsed quote: Telegram shows its first lines
+ * and an arrow to expand the rest.
+ *  - `captionHtml` fits Telegram's 1024-character media caption (text clipped with "…" if needed;
+ *    the author link opens the full post). No second message repeats the text.
  */
 
 export type Block =
@@ -23,16 +23,11 @@ export interface Composed {
   bodyHtml: string;
   bodyPlain: string;
   captionHtml: string;
-  /** Some text was shortened in the caption; `fullTextHtml` has all of it. */
-  clipped: boolean;
-  fullTextHtml: string;
 }
 
 export const CAPTION_BUDGET = 1000;
 /** Per-block cap for the full version so text + translation fit one 4096-character message. */
 const FULL_BLOCK = 1800;
-/** Longer blocks are folded into an expandable quote. */
-const FOLD_OVER = 280;
 
 export function composeCard(header: { html: string; plain: string }, blocks: readonly Block[]): Composed {
   const nonEmpty = blocks.filter((block) => block.text.trim());
@@ -56,37 +51,39 @@ export function composeCard(header: { html: string; plain: string }, blocks: rea
     budget -= limit + 6;
     remaining--;
   }
-  const compact = nonEmpty.map((block) => render(block, limits.get(block)!));
-  const clipped = nonEmpty.some((block) => block.text.trim().length > limits.get(block)!);
+  const compact = nonEmpty.map((block) => ({ block, ...render(block, limits.get(block)!) }));
 
-  const fullText = nonEmpty
-    .filter((b) => b.kind === "text" || b.kind === "translation" || b.kind === "quote")
-    .map((block) => render(block, FULL_BLOCK, true));
-
-  const bodyHtml = full.map((r) => r.html).join("\n\n");
+  const fullWithBlocks = nonEmpty.map((block, i) => ({ block, ...full[i]! }));
+  const bodyHtml = layout(fullWithBlocks);
   const bodyPlain = full.map((r) => r.plain).join("\n\n");
   return {
     headerHtml: header.html,
     bodyHtml,
     bodyPlain,
-    html: [header.html, bodyHtml].filter(Boolean).join("\n\n"),
+    html: [header.html, bodyHtml].filter(Boolean).join("\n"),
     plain: [header.plain, bodyPlain].filter(Boolean).join("\n\n"),
-    captionHtml: [header.html, ...compact.map((r) => r.html)].join("\n\n"),
-    clipped,
-    fullTextHtml: fullText.map((r) => r.html).join("\n\n"),
+    captionHtml: [header.html, layout(compact)].filter(Boolean).join("\n"),
   };
 }
 
-function render(block: Block, limit: number, alwaysFold = false): { html: string; plain: string } {
+/** Titles stay visible; everything else goes into one collapsed quote. */
+function layout(parts: readonly { block: Block; html: string }[]): string {
+  const titles = parts.filter((p) => p.block.kind === "title").map((p) => p.html);
+  const rest = parts.filter((p) => p.block.kind !== "title").map((p) => p.html);
+  return [...titles, rest.length ? folded(rest.join("\n\n")) : ""].filter(Boolean).join("\n");
+}
+
+const folded = (inner: string) => (inner ? `<blockquote expandable>${inner}</blockquote>` : "");
+
+function render(block: Block, limit: number): { html: string; plain: string } {
   const text = clip(block.text.trim(), limit);
-  const folded = (inner: string) => (alwaysFold || text.length > FOLD_OVER ? `<blockquote expandable>${inner}</blockquote>` : inner);
   switch (block.kind) {
     case "title":
       return { html: `<b>${linkifyEscaped(escapeHtml(text))}</b>`, plain: text };
     case "text":
-      return { html: folded(linkifyEscaped(escapeHtml(text))), plain: text };
+      return { html: linkifyEscaped(escapeHtml(text)), plain: text };
     case "translation":
-      return { html: `🌐 ${folded(linkifyEscaped(escapeHtml(text)))}`, plain: `🌐 ${text}` };
+      return { html: `🌐 ${linkifyEscaped(escapeHtml(text))}`, plain: `🌐 ${text}` };
     case "quote":
       return { html: `↪️ <b>@${escapeHtml(block.handle)}</b>: ${linkifyEscaped(escapeHtml(text))}`, plain: `↪️ @${block.handle}: ${text}` };
     case "note":

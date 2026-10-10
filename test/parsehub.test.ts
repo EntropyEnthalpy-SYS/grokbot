@@ -163,7 +163,7 @@ test("stale download folders are removed, fresh ones kept", async () => {
 
 test("card cache: local paths never stored, expires after 7 days, keyed by language", () => {
   const cache = new CardCache(openDbAt(":memory:"));
-  const card = { html: "h", plain: "p", headerHtml: "", bodyHtml: "", bodyPlain: "", captionHtml: "", clipped: false, fullTextHtml: "", media: [{ type: "photo" as const, url: "FILEID" }] };
+  const card = { html: "h", plain: "p", headerHtml: "", bodyHtml: "", bodyPlain: "", captionHtml: "", media: [{ type: "photo" as const, url: "FILEID" }] };
   cache.put("https://u", "zh-tw", "douyin", { ...card, media: [{ type: "photo", url: "/tmp/x.jpg", local: true }] });
   assert.equal(cache.get("https://u", "zh-tw"), undefined);
   cache.put("https://u", "zh-tw", "douyin", card, 1000);
@@ -178,7 +178,7 @@ test("re-posted link: sent from cache without touching ParseHub; disabled platfo
     "/download": () => ({ status: 500, body: { error: "should not download" } }),
   });
   const cache = new CardCache(openDbAt(":memory:"));
-  const card = { html: "<b>c</b>", plain: "c", headerHtml: "", bodyHtml: "", bodyPlain: "", captionHtml: "", clipped: false, fullTextHtml: "", media: [{ type: "video" as const, url: "VIDEO_FILE_ID" }] };
+  const card = { html: "<b>c</b>", plain: "c", headerHtml: "", bodyHtml: "", bodyPlain: "", captionHtml: "", media: [{ type: "video" as const, url: "VIDEO_FILE_ID" }] };
   cache.put("https://v.douyin.com/a/", "zh-tw", "douyin", card);
   const videos: string[] = [];
   const api: CardApi = {
@@ -249,7 +249,6 @@ test("plain video card: linked title, channel and length, the start of the descr
     [],
   );
   assert.equal(card.captionHtml, '🎬 <a href="https://www.youtube.com/watch?v=abc&amp;x=&lt;1&gt;"><b>Rock &amp; &lt;Roll&gt;</b></a>\nHill Studio · 1:02:05\n<blockquote expandable>First line\nSecond line</blockquote>');
-  assert.equal(card.clipped, false);
   const long = plainVideoCard("https://youtu.be/x", { title: "T".repeat(300), durationSec: 7, description: "d".repeat(5000) }, []);
   assert.ok(long.plain.length <= 1024, `caption is ${long.plain.length} characters`);
   assert.match(long.plain, /^🎬 T{79}…\n0:07\n\nd+…$/);

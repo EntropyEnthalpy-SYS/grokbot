@@ -18,7 +18,9 @@
   "dependencies": {
     "@earendil-works/pi-agent-core": "^1.1.0",
     "@earendil-works/pi-ai": "^1.1.0",
-    "grammy": "^1.46.0"
+    "@resvg/resvg-js": "^2.6.2",
+    "grammy": "^1.46.0",
+    "satori": "^0.47.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",

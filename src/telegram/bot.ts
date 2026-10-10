@@ -33,8 +33,11 @@ import type { CardCache } from "../links/cardCache.ts";
 import { inlineResults, urlFromQuery } from "./inline.ts";
 import { defaultLanguage } from "../lang.ts";
 import { AUTO_VOICE_MAX_SECONDS, documentOf, TelegramMedia, videoOf, voiceOf } from "./media.ts";
-import { buildXCard, needsTranslation, sendXCard } from "../links/xcard.ts";
-import { fetchXPost } from "../links/xpost.ts";
+import { buildXCard, needsTranslation, sendXCard, type XCard } from "../links/xcard.ts";
+import { fetchXPost, type XPost } from "../links/xpost.ts";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { escapeHtml } from "./format.ts";
 import {
   buildGroupPrompt,
@@ -84,6 +87,7 @@ export const COMMANDS = [
   { command: "search", description: "Turn web/X search on or off" },
   { command: "links", description: "Group link content: auto | mention | off" },
   { command: "lang", description: "Group translation language" },
+  { command: "xstyle", description: "X posts as text or as a picture of the post" },
   { command: "voice", description: "Group voice transcripts: auto | off" },
   { command: "platforms", description: "Turn link content on/off per platform" },
   { command: "privacy", description: "Group privacy: strict | normal" },
@@ -149,6 +153,8 @@ export interface BotDeps {
   speakers: Map<string, { userId?: number; userName: string }>;
   /** Scheduled checks and alerts; /health runs them on demand. */
   health?: HealthMonitor;
+  /** Draws X posts as pictures for groups with /xstyle picture; without it they stay text cards. */
+  xPicture?: (post: XPost, translation: string | undefined) => Promise<Buffer>;
   links: LinkSummaryDeps & {
     video: VideoReader;
     parsehub?: ParseHubClient;
@@ -186,7 +192,7 @@ type ChatTarget = {
 /** Commands whose replies only the sender sees in groups (Telegram ephemeral commands, Bot API 10.2). */
 const EPHEMERAL_COMMANDS = new Set([
   "help", "start", "stats", "status", "health", "links", "lang", "voice", "platforms", "privacy", "deletelink",
-  "tidy", "lm", "reminders", "unremind", "new", "stop", "forget", "admin", "tz",
+  "tidy", "lm", "reminders", "unremind", "new", "stop", "forget", "admin", "tz", "xstyle",
 ]);
 
 export function createBot({
@@ -212,6 +218,7 @@ export function createBot({
   links,
   inlinePublic = false,
   apiRoot,
+  xPicture,
 }: BotDeps): Bot {
   const bot = new Bot(token, apiRoot ? { client: { apiRoot } } : undefined);
   const media = new TelegramMedia({ api: bot.api, token, grok, video: links.video, apiRoot });
@@ -635,6 +642,19 @@ export function createBot({
     const mode = groups.voiceMode(ctx.chat!.id);
     return ctx.reply(
       `Voice messages: ${mode}. ${mode === "auto" ? "I post a transcript (and translation) of every voice message." : "I transcribe only when asked."}\nOwner can change it: /voice auto | off`,
+    );
+  });
+
+  bot.command("xstyle", async (ctx) => {
+    if (!isGroup(ctx)) return ctx.reply("The X post style is a group setting.");
+    const arg = ctx.match.trim().toLowerCase();
+    if (arg === "text" || arg === "picture") {
+      if (!isOwner(ctx)) return ctx.reply("Only the bot owner can change this.");
+      groups.setXStyle(ctx.chat!.id, arg);
+    }
+    const style = groups.xStyle(ctx.chat!.id);
+    return ctx.reply(
+      `X posts: ${style}. ${style === "picture" ? "Each post is drawn like on X, with its text folded below." : "Each post is shown as text under its images."}\nOwner can change it: /xstyle text | picture`,
     );
   });
 
@@ -1314,12 +1334,21 @@ export function createBot({
         try {
           if (linkKind(url) === "x") {
             if (!allowed("twitter")) continue;
-            const hit = links.cache.get(url, lang);
-            const card = hit?.card ?? (await buildXPostCard(url, lang));
-            const sent = await sendXCard(bot.api, chatId, card, replyOptions);
-            if (!hit && sent.reusable) links.cache.put(url, lang, "twitter", sent.reusable);
-            // Link first: reply context is truncated from the end.
-            autoPost(ctx, chatId, threadId, sent.ids, `[content of ${url}]\n${card.plain}`);
+            const picture = groups.xStyle(chatId) === "picture" && xPicture !== undefined;
+            // Picture cards are cached apart from text cards (same post, different look).
+            const cacheLang = picture ? `${lang}:picture` : lang;
+            const hit = links.cache.get(url, cacheLang);
+            const dir = join(links.mediaDir, randomUUID());
+            let card: XCard;
+            try {
+              card = hit?.card ?? (picture ? await buildXPicture(url, lang, dir) : (await buildXPostCard(url, lang)));
+              const sent = await sendXCard(bot.api, chatId, card, replyOptions);
+              if (!hit && sent.reusable) links.cache.put(url, cacheLang, "twitter", sent.reusable);
+              // Link first: reply context is truncated from the end.
+              autoPost(ctx, chatId, threadId, sent.ids, `[content of ${url}]\n${card.plain}`);
+            } finally {
+              await rm(dir, { recursive: true, force: true });
+            }
             shown++;
             continue;
           }
@@ -1466,10 +1495,37 @@ export function createBot({
     return grok.ask(system, text);
   }
 
-  async function buildXPostCard(url: string, lang: string) {
+  async function fetchXWithTranslation(url: string, lang: string): Promise<{ post: XPost; translation: string | undefined }> {
     const post = await fetchXPost(url, fetch, undefined, lang === "off" ? undefined : lang);
     const translation = needsTranslation(post, lang) ? (post.translation ?? (await translate(post.text, lang))) : undefined;
+    return { post, translation };
+  }
+
+  async function buildXPostCard(url: string, lang: string) {
+    const { post, translation } = await fetchXWithTranslation(url, lang);
     return buildXCard(post, translation);
+  }
+
+  /**
+   * /xstyle picture: the post drawn like on X, first in an album with the post's own media. The caption
+   * keeps the author link and the text folded, so links stay tappable and the post searchable.
+   * Falls back to the text card if drawing fails (fonts missing).
+   */
+  async function buildXPicture(url: string, lang: string, dir: string): Promise<XCard> {
+    const { post, translation } = await fetchXWithTranslation(url, lang);
+    const card = buildXCard(post, translation);
+    let png: Buffer;
+    try {
+      png = await xPicture!(post, translation);
+    } catch (error) {
+      console.warn(`X picture failed, sending the text card: ${errorMessage(error)}`);
+      return card;
+    }
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "post.png");
+    await writeFile(path, png);
+    // Same compact caption as the text card: author line, then the text folded.
+    return { ...card, media: [{ type: "photo", url: path, local: true }, ...card.media] };
   }
 
   /** Fallback when X has no translation ready: ask Grok for a plain translation. */

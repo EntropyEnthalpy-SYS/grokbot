@@ -12,8 +12,6 @@ const card = (media: XCard["media"], plain = "𝕏 A @a\n\nhello"): XCard => ({
   bodyHtml: "hello",
   bodyPlain: "hello",
   captionHtml: "<b>A</b> hello",
-  clipped: false,
-  fullTextHtml: "",
   media,
 });
 

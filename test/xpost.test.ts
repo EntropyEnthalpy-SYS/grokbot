@@ -12,14 +12,14 @@ const fx = {
     text: "Astra is going to have a very tough time",
     author: { name: "Deepanshu Sharma", screen_name: "deepanshusharmx" },
     created_at: "Thu Oct 08 10:12:00 +0000 2026",
-    media: { photos: [{ type: "photo", url: "https://pbs.twimg.com/media/HUF_27QbgAA3H55.jpg?name=orig" }] },
+    media: { photos: [{ type: "photo", url: "https://pbs.twimg.com/media/HUF_27QbgAA3H55.jpg?name=orig", width: 1200, height: 675 }] },
   },
 };
 const syndication = {
   id_str: "2108106795332038952",
   text: "Astra is going to have a very tough time https://t.co/rMgIsaN4KY",
   user: { name: "Deepanshu Sharma", screen_name: "deepanshusharmx" },
-  mediaDetails: [{ type: "photo", media_url_https: "https://pbs.twimg.com/media/HUF_27QbgAA3H55.jpg" }],
+  mediaDetails: [{ type: "photo", media_url_https: "https://pbs.twimg.com/media/HUF_27QbgAA3H55.jpg", original_info: { width: 1200, height: 675 } }],
   photos: [{ url: "https://pbs.twimg.com/media/HUF_27QbgAA3H55.jpg" }],
 };
 
@@ -37,6 +37,8 @@ test("both sources parse to the same post, without the trailing media t.co link"
   assert.equal(a.handle, "deepanshusharmx");
   assert.equal(b.handle, "deepanshusharmx");
   assert.equal(b.photos[0], "https://pbs.twimg.com/media/HUF_27QbgAA3H55.jpg");
+  assert.deepEqual(a.mediaSize, { width: 1200, height: 675 });
+  assert.deepEqual(b.mediaSize, a.mediaSize);
   assert.match(formatXPost(a), /^X post by Deepanshu Sharma \(@deepanshusharmx\)[\s\S]*\[1 image\(s\) attached below\]/);
 });
 

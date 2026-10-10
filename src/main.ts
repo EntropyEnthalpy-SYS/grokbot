@@ -15,6 +15,8 @@ import { markdownToTelegramHtml, splitMarkdown, escapeHtml } from "./telegram/fo
 import { existsSync, mkdirSync } from "node:fs";
 import { removeOldFiles, removeStaleMedia } from "./media/cleanup.ts";
 import { CardCache } from "./links/cardCache.ts";
+import { renderXPicture } from "./links/xshot.ts";
+import { formatPostTime } from "./links/xcard.ts";
 
 loadDotEnv();
 // A stray rejected promise (e.g. a Telegram send that failed) must be logged, not stop the bot.
@@ -112,6 +114,8 @@ const bot = createBot({
   cookies: new CookieStore(`${config.dataDir}/parsehub-cookies.json`),
   polls,
   actions,
+  xPicture: (post, translation) =>
+    renderXPicture(post, { fontDir: config.fontDir, translation, time: post.createdAt ? formatPostTime(post.createdAt) : undefined }),
   ops,
   backup: () => backupWithoutSecrets(db, backupDir),
   health,

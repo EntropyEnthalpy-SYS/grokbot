@@ -15,6 +15,8 @@ export interface Config {
   parsehubUrl?: string;
   /** Upload limit in MB; 50 for Telegram's hosted Bot API, up to 2000 with a local Bot API server. */
   maxUploadMb: number;
+  /** Fonts for X posts drawn as pictures (/xstyle picture); deploy.sh installs them here. */
+  fontDir: string;
   /** Answer inline queries from anyone (default: owner only). */
   inlinePublic: boolean;
   /** Local Bot API server URL; when set, uploads and downloads go up to 2000 MB. */
@@ -45,6 +47,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ytdlpPath: env.YTDLP_PATH?.trim() || undefined,
     ytdlpProxy: env.YTDLP_PROXY?.trim() || undefined,
     parsehubUrl: env.PARSEHUB_URL?.trim() || undefined,
+    fontDir: env.FONT_DIR?.trim() || "/usr/local/share/grokbot-fonts",
     maxUploadMb: Number(env.MAX_UPLOAD_MB?.trim() || (env.TELEGRAM_API_ROOT?.trim() ? 2000 : 50)) || 50,
     inlinePublic: /^(1|true|yes)$/i.test(env.INLINE_PUBLIC?.trim() ?? ""),
     telegramApiRoot: env.TELEGRAM_API_ROOT?.trim().replace(/\/$/, "") || undefined,

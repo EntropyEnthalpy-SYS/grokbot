@@ -173,23 +173,19 @@ export async function sendXCard(api: CardApi, chatId: number, card: XCard, optio
       console.warn(`card media failed: ${(error as Error).message}`);
     }
   }
-  // Caption had to be shortened: the full text follows, folded. No media at all: the whole card as text.
-  const followUp = ids && !fitsCaption && card.clipped && card.fullTextHtml ? { html: card.fullTextHtml, plain: card.bodyPlain } : undefined;
-  const textOnly = !ids ? { html: card.html, plain: card.plain } : undefined;
-  const text = followUp ?? textOnly;
-  if (text) {
-    const replyTo = ids ? { message_id: ids[0]!, allow_sending_without_reply: true } : options.reply_parameters;
-    const common = { ...options, reply_parameters: replyTo, link_preview_options: { is_disabled: true } };
+  // No media at all: the whole card as text. (A clipped caption gets no follow-up: it read as a duplicate.)
+  if (!ids) {
+    const common = { ...options, link_preview_options: { is_disabled: true } };
     let sent: { message_id: number };
     try {
-      sent = await api.sendMessage(chatId, text.html, { ...common, parse_mode: "HTML" });
+      sent = await api.sendMessage(chatId, card.html, { ...common, parse_mode: "HTML" });
     } catch (error) {
       console.warn(`card text failed as HTML, sending plain: ${(error as Error).message}`);
-      sent = await api.sendMessage(chatId, text.plain.slice(0, MESSAGE_TEXT_LIMIT), common);
+      sent = await api.sendMessage(chatId, card.plain.slice(0, MESSAGE_TEXT_LIMIT), common);
     }
-    ids = [...(ids ?? []), sent.message_id];
+    ids = [sent.message_id];
   }
-  return { ids: ids!, reusable };
+  return { ids, reusable };
 }
 
 /**

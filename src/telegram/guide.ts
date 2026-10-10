@@ -47,6 +47,7 @@ const OWNER_GROUP = `<b>👑 Owner commands in a group</b>
 • <code>/links auto</code> · <code>mention</code> · <code>off</code> → link cards always / when asked / never
 • <code>/platforms off douyin weibo</code> → cards off per platform (<code>/platforms</code> lists; <code>upload</code> = uploaded videos)
 • <code>/lang zh-tw</code> → zh-tw · zh-cn · en · ja · ko · off
+• <code>/xstyle picture</code> · <code>text</code> → X posts drawn like on X, or as text
 • <code>/tz Asia/Tokyo</code> · <code>/tz default</code> → time zone for reminders and the time the AI is told
 • <code>/voice auto</code> · <code>off</code> → automatic voice transcripts
 • <code>/tidy on</code> · <code>off</code> → setting replies disappear after 2 min
@@ -69,7 +70,7 @@ const OWNER_PRIVATE = `<b>🔑 Owner commands in private chat</b>
 
 const PANEL = `<b>🗂 The panel</b>
 • 🤖 <b>AI providers</b>: sign in to Grok / ChatGPT / Claude, order them, pick models
-• 👥 <b>Groups</b>: links · privacy · language · voice · tidy · who can use it · persona · voice replies · ✋ confirm notes/polls · 🕒 time zone · 🔞 adult links
+• 👥 <b>Groups</b>: links · privacy · language · voice · tidy · who can use it · persona · voice replies · ✋ confirm notes/polls · 🕒 time zone · 🔞 adult links · 𝕏 X post style
 • 📈 <b>Usage</b>: who used what (today / 7 / 30 days), tokens per provider
 • ⚖️ <b>Limits</b>: ➖/➕ per limit, ⭐ trusted members
 • 🔐 <b>Permissions</b>: per person 💬 private chat · ✅ approved · ⭐ trusted · ⛔ blocked; ➕ add people

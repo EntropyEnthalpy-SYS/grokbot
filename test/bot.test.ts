@@ -40,6 +40,8 @@ function harness(
     video?: Record<string, unknown>;
     /** Each message the bot sends gets its own id (default: all are message 1). */
     distinctIds?: boolean;
+    /** Draws X posts for /xstyle picture. */
+    xPicture?: (post: { text: string }, translation: string | undefined) => Promise<Buffer>;
     /** The chat agent's turn: may call the create_image tool like Grok would. */
     agent?: (
       images: ImageStudio,
@@ -64,6 +66,7 @@ function harness(
     created.push({ prompt, sources: sources?.length ?? 0 });
     return Buffer.from(`jpeg:${prompt}`);
   });
+  const cards = new Map<string, { card: unknown }>();
   const runs: { key: string; ephemeral?: boolean; text: string; images: number }[] = [];
   const sessions = {
     forgetChat: () => 0,
@@ -106,13 +109,14 @@ function harness(
     permissions,
     polls,
     actions,
+    xPicture: options.xPicture as never,
     apiRoot: "http://127.0.0.1:1", // "local Bot API": getFile returns a path on disk
     links: {
       db,
       grok,
       reader: { read: async (url: string) => ({ url, text: "页面正文：翊联电子在郑州。", source: "direct" }) },
       preview: options.preview ?? (async () => ({ title: "A page", snippet: "Its first lines." })),
-      cache: { get: () => undefined, put: () => undefined },
+      cache: { get: (url: string, lang: string) => cards.get(`${url}#${lang}`), put: (url: string, lang: string, _p: string, card: unknown) => void cards.set(`${url}#${lang}`, { card }) },
       video: options.video ?? {},
       uploadLimits: { photoBytes: 10 * 1024 * 1024, videoBytes: 50 * 1024 * 1024 },
       mediaDir: mkdtempSync(join(tmpdir(), "media-")),
@@ -138,7 +142,11 @@ function harness(
     }
     const message_id = options.distinctIds ? ++sentId : 1;
     calls.at(-1)!.sentId = message_id;
-    return { ok: true, result: ["sendMessage", "sendPhoto", "sendVoice"].includes(method) ? { message_id, date: 0, chat: { id: GROUP, type: "supergroup" } } : true } as never;
+    if (method === "sendMediaGroup") {
+      const media = (payload as { media: unknown[] }).media;
+      return { ok: true, result: media.map((_, i) => ({ message_id: message_id + i, date: 0, chat: { id: GROUP, type: "supergroup" }, photo: [{ file_id: `f${message_id + i}` }] })) } as never;
+    }
+    return { ok: true, result: ["sendMessage", "sendPhoto", "sendVoice"].includes(method) ? { message_id, date: 0, chat: { id: GROUP, type: "supergroup" }, photo: [{ file_id: `f${message_id}` }] } : true } as never;
   });
   let updateId = 0;
   let messageId = 100;
@@ -998,4 +1006,53 @@ test("a web link gets a plain card (no AI) with 📝 and 🔗; 📝 adds the AI 
   await h.until((c) => c.method === "sendMessage" && String(c.payload.text).includes("郑州的超硬材料企业"));
   assert.match(h.asked[0]!.prompt, /翊联电子在郑州/, "the summary reads the page");
   assert.deepEqual(h.calls.filter((c) => c.method === "editMessageReplyMarkup").at(-1)!.payload.reply_markup, { inline_keyboard: [[{ text: "🔗", url }]] }, "📝 goes, 🔗 stays");
+});
+
+test("/xstyle picture: the post drawn as a picture first, its own images after, text folded in the caption; drawing fails → text card", async () => {
+  const fx = {
+    tweet: {
+      url: "https://x.com/someone/status/123456",
+      text: "港区Netflix已支持微信支付 https://t.co/abc",
+      raw_text: { text: "港区Netflix已支持微信支付 https://t.co/abc" },
+      lang: "zh",
+      created_at: "Fri Oct 10 14:17:00 +0000 2026",
+      author: { name: "奶昔", screen_name: "someone", avatar_url: "https://pbs.twimg.com/a.jpg", verification: { verified: true } },
+      media: { photos: [{ url: "https://pbs.twimg.com/media/one.jpg" }, { url: "https://pbs.twimg.com/media/two.jpg" }] },
+    },
+  };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL) => (String(input).includes("fxtwitter") ? new Response(JSON.stringify(fx)) : realFetch(input))) as typeof fetch;
+  try {
+    let fail = false;
+    const drawn: string[] = [];
+    const h = harness({ loggedIn: true, distinctIds: true, xPicture: async (post) => (drawn.push(post.text), fail ? Promise.reject(new Error("fonts missing")) : Buffer.from("png")) });
+    h.groups.enable(GROUP, "Grok bot test");
+    h.groups.setLanguage(GROUP, "zh-cn");
+    await h.bot.handleUpdate(h.groupText(5, "/xstyle picture"));
+    assert.equal(h.groups.xStyle(GROUP), "text", "only the owner changes it");
+    await h.bot.handleUpdate(h.groupText(OWNER, "/xstyle picture"));
+    assert.equal(h.groups.xStyle(GROUP), "picture");
+
+    const post = (url: string) => h.groupText(5, url, { entities: [{ type: "url", offset: 0, length: url.length }] });
+    await h.bot.handleUpdate(post("https://x.com/someone/status/123456"));
+    await h.until((c) => c.method === "sendMediaGroup");
+    const album = h.calls.find((c) => c.method === "sendMediaGroup")!.payload.media as { type: string; media: unknown; caption?: string }[];
+    assert.deepEqual(album.map((m) => [m.type, typeof m.media === "string" ? m.media : "uploaded file"]), [
+      ["photo", "uploaded file"],
+      ["photo", "https://pbs.twimg.com/media/one.jpg?name=large"],
+      ["photo", "https://pbs.twimg.com/media/two.jpg?name=large"],
+    ], "the picture first, then the post's own images");
+    assert.match(album[0]!.caption!, /^𝕏 <b>奶昔<\/b> ☑️ <a href="https:\/\/x\.com\/someone\/status\/123456">@someone<\/a>.*\n<blockquote expandable>港区Netflix已支持微信支付<\/blockquote>$/s);
+    assert.equal(h.calls.filter((c) => c.method === "sendMessage" && !String(c.payload.text).startsWith("X posts:") && !String(c.payload.text).startsWith("Only the bot owner")).length, 0, "no follow-up text message under the album");
+    assert.deepEqual(drawn, ["港区Netflix已支持微信支付"]);
+
+    // Drawing fails (fonts missing): the ordinary text card, so the post is never lost.
+    fail = true;
+    h.groups.setXStyle(GROUP, "picture");
+    await h.bot.handleUpdate(post("https://x.com/someone/status/999999"));
+    await h.until((c) => c.method === "sendMediaGroup" && !(c.payload.media as { media: unknown }[]).some((m) => typeof m.media !== "string"));
+
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

@@ -13,6 +13,13 @@ jobs:
           cache: npm
       # Voice-note and media tests convert audio with ffmpeg; document tests read PDFs with poppler.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg poppler-utils
+      # X post pictures (/xstyle picture) need these fonts; the test is skipped without them.
+      - name: Fonts
+        run: |
+          d=$HOME/fonts; mkdir -p $d
+          for f in NotoSans-Regular.ttf NotoSans-Bold.ttf; do curl -fsSL -o $d/$f https://github.com/notofonts/notofonts.github.io/raw/main/fonts/NotoSans/hinted/ttf/$f; done
+          for f in SC/NotoSansSC-Regular.otf SC/NotoSansSC-Bold.otf TC/NotoSansTC-Regular.otf; do curl -fsSL -o $d/${f#*/} https://github.com/notofonts/noto-cjk/raw/main/Sans/SubsetOTF/$f; done
+          echo "FONT_DIR=$d" >> $GITHUB_ENV
       - run: npm ci
       - run: npm run typecheck
       - run: npm test

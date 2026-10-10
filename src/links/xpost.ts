@@ -17,6 +17,8 @@ export interface XPost {
   url: string;
   author: string;
   handle: string;
+  /** Profile picture (pbs.twimg.com), for the picture style. */
+  avatarUrl?: string;
   verified?: boolean;
   createdAt?: string;
   /** Language X detected for the text, e.g. "en", "zh". */
@@ -26,6 +28,8 @@ export interface XPost {
   translation?: string;
   photos: string[];
   videos: XVideo[];
+  /** Size of the first photo (else the first video), when the source reports it. */
+  mediaSize?: { width: number; height: number };
   /** Video thumbnails; derived from `videos`. */
   videoThumbnails: string[];
   quote?: XPost;
@@ -92,6 +96,7 @@ export function parseFx(tweet: Json): XPost {
     url: tweet.url ?? "",
     author: tweet.author?.name ?? "",
     handle: tweet.author?.screen_name ?? "",
+    avatarUrl: tweet.author?.avatar_url ?? undefined,
     verified: Boolean(tweet.author?.verification?.verified ?? tweet.author?.verified),
     createdAt: tweet.created_at,
     lang: tweet.lang ?? undefined,
@@ -99,6 +104,7 @@ export function parseFx(tweet: Json): XPost {
     translation: translation ? stripMediaLink(translation) : undefined,
     photos: (media.photos ?? []).map((photo: Json) => String(photo.url)).filter(Boolean),
     videos,
+    mediaSize: sizeOf(media.photos?.[0] ?? media.videos?.[0]),
     videoThumbnails: videos.map((video) => video.thumbnail).filter(Boolean),
     quote: tweet.quote ? parseFx(tweet.quote) : undefined,
   };
@@ -130,15 +136,23 @@ export function parseSyndication(tweet: Json): XPost {
     url: `https://x.com/${tweet.user?.screen_name ?? "i"}/status/${tweet.id_str}`,
     author: tweet.user?.name ?? "",
     handle: tweet.user?.screen_name ?? "",
+    avatarUrl: tweet.user?.profile_image_url_https ?? undefined,
     verified: Boolean(tweet.user?.is_blue_verified ?? tweet.user?.verified),
     createdAt: tweet.created_at,
     lang: tweet.lang ?? undefined,
     text: stripMediaLink(String(tweet.text ?? "")),
     photos: details.filter((m) => m.type === "photo").map((m) => String(m.media_url_https)),
     videos,
+    mediaSize: sizeOf((details.find((m) => m.type === "photo") ?? details[0])?.original_info),
     videoThumbnails: videos.map((video) => video.thumbnail).filter(Boolean),
     quote: tweet.quoted_tweet ? parseSyndication(tweet.quoted_tweet) : undefined,
   };
+}
+
+function sizeOf(media: Json | undefined): XPost["mediaSize"] {
+  const width = Number(media?.width);
+  const height = Number(media?.height);
+  return width > 0 && height > 0 ? { width, height } : undefined;
 }
 
 /** X appends a t.co link to the attached media at the end of the text; it's noise once the media is shown. */

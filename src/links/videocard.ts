@@ -79,7 +79,7 @@ export function plainVideoCard(url: string, meta: Pick<VideoMetadata, "title" | 
   const bodyHtml = [info && escapeHtml(info), description && `<blockquote expandable>${linkifyEscaped(escapeHtml(description))}</blockquote>`].filter(Boolean).join("\n");
   const html = bodyHtml ? `${headerHtml}\n${bodyHtml}` : headerHtml;
   const plain = bodyPlain ? `${headerPlain}\n${bodyPlain}` : headerPlain;
-  return { html, plain, headerHtml, bodyHtml, bodyPlain, captionHtml: html, clipped: false, fullTextHtml: "", media };
+  return { html, plain, headerHtml, bodyHtml, bodyPlain, captionHtml: html, media };
 }
 
 /** Titles longer than this are shortened (a phone shows ~25 characters per line under a video). */

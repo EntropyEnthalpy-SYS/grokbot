@@ -9,6 +9,7 @@ export const LINK_MODES: readonly LinkMode[] = ["auto", "mention", "off"];
 export type VoiceMode = "auto" | "off";
 export type GroupAccess = "everyone" | "approved";
 export type PrivacyMode = "strict" | "normal";
+export type XStyle = "text" | "picture";
 export { defaultLanguage, LANGUAGES, languageName } from "../lang.ts";
 
 /** Context window handed to Grok when someone addresses the bot in a group. */
@@ -220,6 +221,16 @@ export class GroupStore {
 
   setConfirmActions(chatId: number, on: boolean): void {
     this.#db.prepare("UPDATE groups SET confirm_actions = ? WHERE chat_id = ?").run(on ? 1 : 0, chatId);
+  }
+
+  /** How X posts are shown here: a text card, or a picture drawn like the post. */
+  xStyle(chatId: number): XStyle {
+    const row = this.#db.prepare("SELECT x_style FROM groups WHERE chat_id = ?").get(chatId) as { x_style: string } | undefined;
+    return row?.x_style === "picture" ? "picture" : "text";
+  }
+
+  setXStyle(chatId: number, style: XStyle): void {
+    this.#db.prepare("UPDATE groups SET x_style = ? WHERE chat_id = ?").run(style, chatId);
   }
 
   /** Skip link cards for adult sites (🔞, on unless the owner turns it off). */

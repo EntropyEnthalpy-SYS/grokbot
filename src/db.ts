@@ -138,6 +138,8 @@ export function openDbAt(path: string): Db {
   db.exec("DROP TABLE IF EXISTS auto_posts");
   // Replies to bot messages sent before answers were recorded keep counting as questions.
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('answers_tracked_since', ?)").run(String(Date.now()));
+  // How X posts are shown: "text" (caption under the post's media) or "picture" (drawn like the post).
+  addColumnIfMissing(db, "groups", "x_style", "TEXT NOT NULL DEFAULT 'text'");
   migrateTrusted(db);
   return db;
 }

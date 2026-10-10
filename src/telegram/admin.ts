@@ -442,6 +442,8 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
       .text(`🕒 Time zone: ${zoneLabel(groups.timeZone(chatId))}`, `adm:gtz:${chatId}`)
       .text(`🔞 Adult links: ${groups.hideAdult(chatId) ? "hidden" : "shown"}`, `adm:gs:${chatId}:adult`)
       .row()
+      .text(`𝕏 X posts: ${groups.xStyle(chatId)}`, `adm:gs:${chatId}:xstyle`)
+      .row()
       .text(groups.persona(chatId) ? "🎭 Change persona" : "🎭 Set persona", `adm:gp:${chatId}`);
     if (groups.persona(chatId)) keyboard.text("🎭 Clear", `adm:gpc:${chatId}`);
     keyboard.row().text("⬅️ Groups", "adm:grp");
@@ -483,6 +485,8 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
         return groups.setConfirmActions(chatId, !groups.confirmActions(chatId));
       case "adult":
         return groups.setHideAdult(chatId, !groups.hideAdult(chatId));
+      case "xstyle":
+        return groups.setXStyle(chatId, groups.xStyle(chatId) === "picture" ? "text" : "picture");
     }
   }
 

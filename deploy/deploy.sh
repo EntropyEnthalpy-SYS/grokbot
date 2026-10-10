@@ -34,6 +34,16 @@ install -m 644 /opt/grokbot/deploy/grokbot.service /etc/systemd/system/grokbot.s
 # PDF text (pdftotext) and scanned pages (pdftoppm) for document summaries.
 command -v pdftotext >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq poppler-utils >/dev/null; }
 
+# Fonts for X posts drawn as pictures (/xstyle picture): Noto Sans (Latin) and Noto Sans SC/TC (Chinese).
+fonts=/usr/local/share/grokbot-fonts; install -d -m 755 "$fonts"
+for f in NotoSans-Regular.ttf NotoSans-Bold.ttf; do
+  [ -s "$fonts/$f" ] || curl -fsSL -o "$fonts/$f" "https://github.com/notofonts/notofonts.github.io/raw/main/fonts/NotoSans/hinted/ttf/$f" || echo "warning: font $f not downloaded"
+done
+for f in SC/NotoSansSC-Regular.otf SC/NotoSansSC-Bold.otf TC/NotoSansTC-Regular.otf; do
+  [ -s "$fonts/${f#*/}" ] || curl -fsSL -o "$fonts/${f#*/}" "https://github.com/notofonts/noto-cjk/raw/main/Sans/SubsetOTF/$f" || echo "warning: font ${f#*/} not downloaded"
+done
+chmod 644 "$fonts"/* 2>/dev/null || true
+
 # yt-dlp in its own venv (with curl_cffi for browser impersonation), updated daily.
 if [ ! -x /opt/yt-dlp/bin/yt-dlp ]; then
   python3 -m venv /opt/yt-dlp
