@@ -63,11 +63,43 @@ export function escapeAttr(text: string): string {
 /** Links first (so markup inside a URL stays untouched), then bold/italic/strike. Input is HTML-escaped. */
 function formatEmphasis(text: string): string {
   const links: string[] = [];
-  const slotted = text.replace(LINK, (_m, label: string, url: string) => {
-    links.push(`<a href="${escapeAttr(url)}">${emphasize(label)}</a>`);
-    return `\u0000${links.length - 1}\u0000`;
-  });
+  const slot = (html: string) => (links.push(html), `\u0000${links.length - 1}\u0000`);
+  const slotted = text
+    .replace(LINK, (_m, label: string, url: string) => slot(`<a href="${escapeAttr(url)}">${emphasize(label)}</a>`))
+    .replace(BARE_URL, (match: string) => linkBare(match, slot));
   return emphasize(slotted).replace(SLOT, (_m, i: string) => links[Number(i)] ?? "");
+}
+
+/**
+ * Bare addresses ("claude.ai/settings/account", "https://x.com/a?b=1"): ASCII only, so a link
+ * never swallows the Chinese text around it. Telegram would otherwise link them itself and, with
+ * no space between, take "登录Claude后打开claude.ai/…，复制…" as one (wrong) address.
+ * Domains without https:// need a common top-level domain, so "Node.js", "README.md" and "3.8" stay text.
+ */
+const TLDS = "com|net|org|edu|gov|io|ai|app|dev|me|co|tv|gg|xyz|info|biz|cn|tw|jp|hk|sg|kr|uk|us|de|fr|ru|in|au|ca|nl|eu|ly|to|cc|fm|im|la|vc|page|site|online|tech|top|cloud|blog|news|store|shop|live|link|club|vip|pro|art|one|life|world|today|wiki|tools";
+const URL_PATH = "(?:&amp;|[A-Za-z0-9\\-._~%!$'()*+,;=:@/?#\\[\\]])*";
+const BARE_URL = new RegExp(
+  `(?<![A-Za-z0-9.@/\\-])(?:https?://[A-Za-z0-9.-]+(?::\\d{1,5})?(?:/${URL_PATH})?|(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.)+(?:${TLDS})(?![A-Za-z0-9-])(?::\\d{1,5})?(?:/${URL_PATH})?)`,
+  "gi",
+);
+
+/** One bare address as a link; trailing sentence punctuation ("…/account." or "(see x.com)") stays outside. */
+function linkBare(match: string, slot: (html: string) => string): string {
+  let url = match;
+  let tail = "";
+  while (/[.,;:!?'\])]$/.test(url) && !(url.endsWith(")") && (url.match(/\(/g)?.length ?? 0) >= (url.match(/\)/g)?.length ?? 0))) {
+    tail = url.slice(-1) + tail;
+    url = url.slice(0, -1);
+  }
+  const href = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+  return slot(`<a href="${escapeAttr(href)}">${url}</a>`) + tail;
+}
+
+/** Bare addresses in HTML-escaped plain text (card bodies), linked the same way as in replies. */
+export function linkifyEscaped(escaped: string): string {
+  const links: string[] = [];
+  const slotted = escaped.replace(BARE_URL, (match: string) => linkBare(match, (html) => (links.push(html), `\u0000${links.length - 1}\u0000`)));
+  return slotted.replace(SLOT, (_m, i: string) => links[Number(i)] ?? "");
 }
 
 const MARKERS = ["**", "__", "~~", "*", "_"] as const;

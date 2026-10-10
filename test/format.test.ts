@@ -92,3 +92,20 @@ test("every converted line has balanced tags (random markdown)", () => {
     assert.deepEqual(stack, [], `unclosed for ${JSON.stringify(md)} → ${html}`);
   }
 });
+
+import { linkifyEscaped } from "../src/telegram/format.ts";
+
+test("bare addresses are linked with ASCII-only edges, so Telegram can't stretch a link over the Chinese text around it", () => {
+  assert.equal(
+    markdownToTelegramHtml("- 登录Claude后打开claude.ai/settings/account，复制Account页面里的Organization ID。"),
+    '• 登录Claude后打开<a href="https://claude.ai/settings/account">claude.ai/settings/account</a>，复制Account页面里的Organization ID。',
+  );
+  assert.equal(markdownToTelegramHtml("见 https://example.com/a?b=1&c=2。"), '见 <a href="https://example.com/a?b=1&amp;c=2">https://example.com/a?b=1&amp;c=2</a>。');
+  assert.equal(markdownToTelegramHtml("(github.com/a_b_c)"), '(<a href="https://github.com/a_b_c">github.com/a_b_c</a>)', "brackets outside, underscores not italic");
+  assert.equal(markdownToTelegramHtml("https://en.wikipedia.org/wiki/Foo_(bar) end"), '<a href="https://en.wikipedia.org/wiki/Foo_(bar)">https://en.wikipedia.org/wiki/Foo_(bar)</a> end');
+  const untouched = "v2.0.1、Node.js、README.md、3.8、mail@foo.com、e.g. this";
+  assert.equal(markdownToTelegramHtml(untouched), untouched, "versions, file names and e-mail stay text");
+  assert.equal(markdownToTelegramHtml("`claude.ai/x` [官网](https://claude.ai)"), '<code>claude.ai/x</code> <a href="https://claude.ai">官网</a>', "code and real links are not linked twice");
+  // Card text (X, Douyin, … posts) gets the same treatment.
+  assert.equal(linkifyEscaped("打开claude.ai，然后"), '打开<a href="https://claude.ai">claude.ai</a>，然后');
+});

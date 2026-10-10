@@ -8,7 +8,7 @@ import { removeOldFiles, removeStaleMedia } from "../src/media/cleanup.ts";
 import { openDbAt } from "../src/db.ts";
 import { CardCache } from "../src/links/cardCache.ts";
 import { isOnlyLinks } from "../src/telegram/groups.ts";
-import { plainVideoCard } from "../src/links/videocard.ts";
+import { cardTitle, plainVideoCard } from "../src/links/videocard.ts";
 import { buildPostCard, CLOUD_LIMITS, isJpegOrPng, photoParts, prepareMedia, prepareVideo } from "../src/links/phcard.ts";
 import { normalizeFile, ParseHubClient, type PhDownload, type PhPost } from "../src/links/parsehub.ts";
 import { sendPostCard } from "../src/links/postcard.ts";
@@ -252,10 +252,18 @@ test("plain video card: linked title, channel and length, the start of the descr
   assert.equal(card.clipped, false);
   const long = plainVideoCard("https://youtu.be/x", { title: "T".repeat(300), durationSec: 7, description: "d".repeat(5000) }, []);
   assert.ok(long.plain.length <= 1024, `caption is ${long.plain.length} characters`);
-  assert.match(long.plain, /^🎬 T{200}\n0:07\n\nd+…$/);
+  assert.match(long.plain, /^🎬 T{79}…\n0:07\n\nd+…$/);
   assert.equal(plainVideoCard("https://youtu.be/x", {}, []).plain, "🎬 Video", "no metadata: still a card");
   assert.equal(plainVideoCard("https://youtu.be/x", { title: "Beautiful Chinese Girls #chinesefashion #shorts #model" }, []).plain, "🎬 Beautiful Chinese Girls");
   assert.equal(plainVideoCard("https://youtu.be/x", { title: "#shorts #funny" }, []).plain, "🎬 #shorts #funny", "only hashtags: kept");
+  assert.equal(
+    cardTitle("#DailyWearShare #Comfortableandbeautifulcombination #Simpleandhigh-endwear #Commutingwearreference #"),
+    "#DailyWearShare …",
+    "a hashtag wall is cut to its first tags; the lone # goes",
+  );
+  assert.equal(cardTitle(`#${"x".repeat(60)}`), `#${"x".repeat(38)}…`, "one very long tag is cut");
+  assert.equal(cardTitle("A ".repeat(60).trim()).length, 80, "long titles are shortened");
+  assert.equal(cardTitle("   "), "Video");
   assert.equal(plainVideoCard("https://youtu.be/x", { title: "C# tutorial #1 for beginners" }, []).plain, "🎬 C# tutorial #1 for beginners", "hashtags inside the title stay");
 });
 

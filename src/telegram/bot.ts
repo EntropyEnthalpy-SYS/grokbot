@@ -28,6 +28,7 @@ import type { ParseHubClient } from "../links/parsehub.ts";
 import type { UploadLimits } from "../links/phcard.ts";
 import { sendPostCard, type PostCardDeps } from "../links/postcard.ts";
 import { sendPlainVideoCard } from "../links/videocard.ts";
+import { plainWebCard, webPreview, type WebPreview } from "../links/webcard.ts";
 import type { CardCache } from "../links/cardCache.ts";
 import { inlineResults, urlFromQuery } from "./inline.ts";
 import { defaultLanguage } from "../lang.ts";
@@ -108,6 +109,13 @@ export const QUESTIONS_PER_USER_PER_HOUR = LIMITS.questionsPerUserHour.default;
 export const QUESTIONS_PER_GROUP_PER_HOUR = LIMITS.questionsPerGroupHour.default;
 /** Callback data of the 📝 Summary button under video cards. */
 const SUMMARY_BUTTON = "vsum";
+
+/** Buttons under a video or web card: 📝 (until used) asks the AI for a summary; ▶️ / 🔗 opens the original. */
+function linkButtons(url: string, summary: { text: string; callback_data: string } | undefined, open: "▶️" | "🔗") {
+  return { inline_keyboard: [[...(summary ? [summary] : []), { text: open, url }]] };
+}
+// Symbols only: a full-width Telegram button with a short label looks lighter under a video.
+const SUMMARY = { text: "📝", callback_data: SUMMARY_BUTTON };
 /** A link reposted within this time after its card gets no second card. */
 const REPOST_WINDOW_MS = 6 * HOUR;
 /** Group answers Grok works on at once; more wait their turn. */
@@ -148,6 +156,8 @@ export interface BotDeps {
     cache: CardCache;
     downloaders?: PostCardDeps["downloaders"];
     mediaDir: string;
+    /** Title and snippet of a web page for its plain card (default: fetched directly, then the link reader). */
+    preview?: (url: string) => Promise<WebPreview | undefined>;
   };
   inlinePublic?: boolean;
   /** Local Bot API server, e.g. http://127.0.0.1:8081 (2000 MB files); default Telegram's cloud. */
@@ -948,9 +958,13 @@ export function createBot({
     if (!mayAsk(ctx, chatId)) return ctx.answerCallbackQuery({ text: "You've reached your question limit for now. (/stats)", show_alert: true });
     summarizing.add(key);
     const threadId = card.message_thread_id && card.is_topic_message ? card.message_thread_id : 0;
-    const restore = { inline_keyboard: [[{ text: "📝 Summary", callback_data: SUMMARY_BUTTON }]] };
+    // A 🎬 card is a video, anything else a web page.
+    const open = (card.caption ?? card.text ?? "").startsWith("🎬") ? "▶️" : "🔗";
+    const restore = linkButtons(url, SUMMARY, open);
     await ctx.answerCallbackQuery({ text: "📝 Watching the video… (about 15 s)" });
-    await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [[{ text: `📝 Summarizing for ${displayName(ctx.from).slice(0, 30)}…`, callback_data: "rem:done" }]] } }).catch(() => undefined);
+    await ctx
+      .editMessageReplyMarkup({ reply_markup: linkButtons(url, { text: "⏳", callback_data: "rem:done" }, open) })
+      .catch(() => undefined);
     const typing = keepTyping(ctx, threadId);
     try {
       const summary = await summarizeLink(links, url, groups.language(chatId));
@@ -958,7 +972,8 @@ export function createBot({
       answered(chatId, ids);
       logBotMessage(ctx, chatId, threadId, ids[0], `[summary of ${url}]\n${summary}`);
       usage.record(chatId, who(ctx), "card");
-      await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => undefined);
+      // The summary is posted: only ▶️ Original stays.
+      await ctx.editMessageReplyMarkup({ reply_markup: linkButtons(url, undefined, open) }).catch(() => undefined);
     } catch (error) {
       console.warn(`summary failed for ${url}: ${errorMessage(error)}`);
       health?.recordError(error);
@@ -1292,7 +1307,6 @@ export function createBot({
       reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
       ...(threadId ? { message_thread_id: threadId } : {}),
     };
-    const webCards: { url: string; card: string }[] = [];
     let shown = 0;
     const typing = keepTyping(ctx, threadId);
     try {
@@ -1340,27 +1354,30 @@ export function createBot({
               replyOptions,
             );
             await bot.api
-              .editMessageReplyMarkup(chatId, sent.ids[0]!, { reply_markup: { inline_keyboard: [[{ text: "📝 Summary", callback_data: SUMMARY_BUTTON }]] } })
+              .editMessageReplyMarkup(chatId, sent.ids[0]!, { reply_markup: linkButtons(url, SUMMARY, "▶️") })
               .catch((error) => console.warn(`summary button not added: ${errorMessage(error)}`));
             autoPost(ctx, chatId, threadId, sent.ids, `[content of ${url}]\n${sent.plain}`);
             shown++;
             continue;
           }
-          if (!(await grok.isLoggedIn())) continue;
-          webCards.push({ url, card: await summarizeLink(links, url, lang) });
+          // Web pages, like a link preview: title and the start of the page, no AI. 📝 for a summary on request.
+          const preview = await (links.preview ?? ((u: string) => webPreview(links.reader, u)))(url);
+          if (!preview) continue;
+          const card = plainWebCard(url, preview);
+          const sent = await bot.api.sendMessage(chatId, card.html, {
+            ...replyOptions,
+            parse_mode: "HTML",
+            link_preview_options: { is_disabled: true },
+            reply_markup: linkButtons(url, SUMMARY, "🔗"),
+          });
+          autoPost(ctx, chatId, threadId, [sent.message_id], `[content of ${url}]\n${card.plain}`);
+          shown++;
         } catch (error) {
           console.warn(`link content failed for ${url}: ${errorMessage(error)}`);
         }
       }
     } finally {
       typing.stop();
-    }
-    if (webCards.length > 0) {
-      const text = webCards.map((entry) => entry.card).join("\n\n");
-      const ids = await new ReplyStreamer(bot.api, chatId, { replyTo: message.message_id, threadId }).finish(text);
-      const logged = `[content of ${webCards.map((entry) => entry.url).join(", ")}]\n${text}`;
-      autoPost(ctx, chatId, threadId, ids, logged);
-      shown += webCards.length;
     }
     usage.record(chatId, who(ctx), "card", shown);
     // Optional: remove a link-only message once every link in it has a card.

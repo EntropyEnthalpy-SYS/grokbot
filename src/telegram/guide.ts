@@ -25,7 +25,7 @@ In a group it stays quiet until addressed: <b>@mention</b> it, <b>reply</b> to o
   In groups, notes and polls first appear as a preview: the person who asked taps ✅ (or ✖️).
 • a voice message starting with “grok, …” → answer in text and voice
 
-Automatic: posted links show what they contain (no comments), voice notes get a transcript. YouTube and other video links show the video with its title; tap <b>📝 Summary</b> under it for what it says (counts as a question). No cards for t.me links, adult sites or a link reposted within 6 hours.
+Automatic: posted links show what they contain (no comments), voice notes get a transcript. Video links show the video and its title, web links the page title and first lines, with no AI. Tap <b>📝</b> under a card for an AI summary (counts as a question), <b>▶️</b>/<b>🔗</b> to open the original. No cards for t.me links, adult sites or a link reposted within 6 hours.
 
 Replying to one of its <b>answers</b> continues the conversation. Replies to its cards, transcripts, reminders or notices, and reactions like 哈哈 / 6 / 👍, are left alone: add <b>grok,</b> to ask about them.`;
 

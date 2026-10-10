@@ -10,7 +10,7 @@ Plain TypeScript on Node 24 (no build step), [grammY](https://grammy.dev), [pi](
 
 **In groups**
 - **Answers when addressed**: @mention, a reply to the bot, or a message starting with “grok,”. Web and X search (also on ChatGPT/Claude, through Tavily), reading links, watching videos, seeing photos, reading documents (PDF, Word, PowerPoint, text; scanned PDFs as page images).
-- **Link cards without commentary**: X posts (original media + translation), web pages, YouTube and other videos (the video itself with its title and description, no AI; a 📝 Summary button adds an AI summary on request), and Douyin, Xiaohongshu, Weibo, Bilibili, Kuaishou, Instagram, Facebook, Threads, Tieba, Douban… through [ParseHub](https://github.com/z-mio/ParseHub).
+- **Link cards without commentary**: X posts (original media + translation), web pages (title and first lines), YouTube and other videos (the video itself with its title and description); no AI for any of them. A 📝 button under video and web cards adds an AI summary on request, and Douyin, Xiaohongshu, Weibo, Bilibili, Kuaishou, Instagram, Facebook, Threads, Tieba, Douban… through [ParseHub](https://github.com/z-mio/ParseHub).
 - **Voice**: transcripts (+ translation) of voice notes; questions asked by voice get a text and a voice-note answer.
 - **`/tr`** translates a replied message, voice note, document or the text in a photo. **`/img`** or “grok, 畫…” creates or edits images (Grok Imagine).
 - **Reminders** (`/remind`, “grok, 提醒我們…”) confirmed with the time understood, with edit, pause/resume and 💤 snooze; **scheduled posts** the bot writes itself (`/schedule 每天早上8點 台北天氣`); a **time zone per chat** (`/tz`).

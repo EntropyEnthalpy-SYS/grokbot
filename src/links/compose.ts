@@ -1,4 +1,4 @@
-import { escapeHtml } from "../telegram/format.ts";
+import { escapeHtml, linkifyEscaped } from "../telegram/format.ts";
 
 /**
  * Card layout shared by X posts and ParseHub posts:
@@ -82,15 +82,15 @@ function render(block: Block, limit: number, alwaysFold = false): { html: string
   const folded = (inner: string) => (alwaysFold || text.length > FOLD_OVER ? `<blockquote expandable>${inner}</blockquote>` : inner);
   switch (block.kind) {
     case "title":
-      return { html: `<b>${escapeHtml(text)}</b>`, plain: text };
+      return { html: `<b>${linkifyEscaped(escapeHtml(text))}</b>`, plain: text };
     case "text":
-      return { html: folded(escapeHtml(text)), plain: text };
+      return { html: folded(linkifyEscaped(escapeHtml(text))), plain: text };
     case "translation":
-      return { html: `🌐 ${folded(escapeHtml(text))}`, plain: `🌐 ${text}` };
+      return { html: `🌐 ${folded(linkifyEscaped(escapeHtml(text)))}`, plain: `🌐 ${text}` };
     case "quote":
-      return { html: `↪️ <b>@${escapeHtml(block.handle)}</b>: ${escapeHtml(text)}`, plain: `↪️ @${block.handle}: ${text}` };
+      return { html: `↪️ <b>@${escapeHtml(block.handle)}</b>: ${linkifyEscaped(escapeHtml(text))}`, plain: `↪️ @${block.handle}: ${text}` };
     case "note":
-      return { html: escapeHtml(text), plain: text };
+      return { html: linkifyEscaped(escapeHtml(text)), plain: text };
   }
 }
 

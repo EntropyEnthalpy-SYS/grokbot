@@ -34,6 +34,8 @@ function harness(
     files?: Record<string, string>;
     /** Telegram refuses ephemeral messages (bot is not an admin). */
     refuseEphemeral?: boolean;
+    /** Title and snippet of a web page (default: a fixed fake page). */
+    preview?: (url: string) => Promise<{ title?: string; snippet: string } | undefined>;
     /** The video reader (YouTube cards and summaries). */
     video?: Record<string, unknown>;
     /** Each message the bot sends gets its own id (default: all are message 1). */
@@ -108,7 +110,8 @@ function harness(
     links: {
       db,
       grok,
-      reader: {},
+      reader: { read: async (url: string) => ({ url, text: "页面正文：翊联电子在郑州。", source: "direct" }) },
+      preview: options.preview ?? (async () => ({ title: "A page", snippet: "Its first lines." })),
       cache: { get: () => undefined, put: () => undefined },
       video: options.video ?? {},
       uploadLimits: { photoBytes: 10 * 1024 * 1024, videoBytes: 50 * 1024 * 1024 },
@@ -933,7 +936,7 @@ test("a YouTube link gets a plain card (no AI) with 📝 Summary; a tap adds the
   assert.match(String(card.payload.caption), /^🎬 <a href="https:\/\/youtube\.com\/shorts\/aBcDeFgHiJk"><b>山间日出<\/b><\/a>\nHill Studio · 0:11/);
   const button = h.calls.find((c) => c.method === "editMessageReplyMarkup")!;
   assert.equal(button.payload.message_id, card.sentId);
-  assert.match(JSON.stringify(button.payload.reply_markup), /📝 Summary.*vsum/);
+  assert.deepEqual(button.payload.reply_markup, { inline_keyboard: [[{ text: "📝", callback_data: "vsum" }, { text: "▶️", url }]] });
 
   // Someone taps 📝 Summary. The link is read back from the card's title.
   const tap = (from: number) =>
@@ -961,7 +964,7 @@ test("a YouTube link gets a plain card (no AI) with 📝 Summary; a tap adds the
   assert.equal(h.asked.length, 1, "the AI is asked only now");
   const summary = h.calls.find((c) => c.method === "sendMessage" && String(c.payload.text).includes("山顶的日出"))!;
   assert.equal((summary.payload.reply_parameters as { message_id: number }).message_id, card.sentId, "posted as a reply to the card");
-  assert.equal(JSON.stringify(h.calls.filter((c) => c.method === "editMessageReplyMarkup").at(-1)!.payload.reply_markup), '{"inline_keyboard":[]}', "button removed");
+  assert.deepEqual(h.calls.filter((c) => c.method === "editMessageReplyMarkup").at(-1)!.payload.reply_markup, { inline_keyboard: [[{ text: "▶️", url }]] }, "📝 goes, ▶️ stays");
   assert.equal(h.groups.isAnswer(GROUP, summary.sentId!, Date.now()), true, "replies to the summary continue the conversation");
 
   // Same person again: over their limit (1 per hour), refused without asking the AI.
@@ -969,4 +972,30 @@ test("a YouTube link gets a plain card (no AI) with 📝 Summary; a tap adds the
   assert.match(JSON.stringify(h.calls.at(-1)!.payload), /question limit/);
   assert.equal(h.asked.length, 1);
   assert.deepEqual(metadataCalls, [url]);
+});
+
+test("a web link gets a plain card (no AI) with 📝 and 🔗; 📝 adds the AI summary of the page", async () => {
+  const h = harness({ loggedIn: true, distinctIds: true, preview: async () => ({ title: "翊联电子", snippet: "超硬材料企业" }), ask: () => "🔗 **翊联电子**\n- 郑州的超硬材料企业" });
+  h.groups.enable(GROUP, "Grok bot test");
+  const url = "https://example.com/yilian";
+  await h.bot.handleUpdate(h.groupText(5, `看这个 ${url}`, { entities: [{ type: "url", offset: 4, length: url.length }] }));
+  await h.until((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("🔗"));
+  assert.equal(h.asked.length, 0, "no AI for the card");
+  const card = h.calls.find((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("🔗"))!;
+  assert.equal(card.payload.text, `🔗 <a href="${url}"><b>翊联电子</b></a>\n<blockquote expandable>超硬材料企业</blockquote>`);
+  assert.deepEqual(card.payload.reply_markup, { inline_keyboard: [[{ text: "📝", callback_data: "vsum" }, { text: "🔗", url }]] });
+
+  await h.bot.handleUpdate({
+    update_id: h.next(),
+    callback_query: {
+      id: "1",
+      from: { id: 6, is_bot: false, first_name: "user6" },
+      chat_instance: "c",
+      data: "vsum",
+      message: { message_id: card.sentId!, date: 1, chat: { id: GROUP, type: "supergroup" }, from: { id: 999, is_bot: true, first_name: "Grokky" }, text: "🔗 翊联电子\n超硬材料企业", entities: [{ type: "text_link", offset: 3, length: 4, url }] },
+    },
+  } as Update);
+  await h.until((c) => c.method === "sendMessage" && String(c.payload.text).includes("郑州的超硬材料企业"));
+  assert.match(h.asked[0]!.prompt, /翊联电子在郑州/, "the summary reads the page");
+  assert.deepEqual(h.calls.filter((c) => c.method === "editMessageReplyMarkup").at(-1)!.payload.reply_markup, { inline_keyboard: [[{ text: "🔗", url }]] }, "📝 goes, 🔗 stays");
 });

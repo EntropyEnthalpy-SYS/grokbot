@@ -2,7 +2,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { VideoMetadata, VideoReader } from "../media/video.ts";
-import { escapeAttr, escapeHtml } from "../telegram/format.ts";
+import { escapeAttr, escapeHtml, linkifyEscaped } from "../telegram/format.ts";
 import type { CardCache } from "./cardCache.ts";
 import { CAPTION_BUDGET } from "./compose.ts";
 import { prepareVideo, type UploadLimits } from "./phcard.ts";
@@ -69,20 +69,44 @@ export async function sendPlainVideoCard(deps: VideoCardDeps, chatId: number, ur
 
 /** "🎬 Title" (linked to the video), "Channel · 3:21", and the start of the description, within one caption. */
 export function plainVideoCard(url: string, meta: Pick<VideoMetadata, "title" | "uploader" | "durationSec" | "description">, media: XCardMedia[]): XCard {
-  // "Beautiful Girls #shorts #model": the hashtag tail goes, unless the title is only hashtags.
-  const raw = (meta.title ?? "").trim();
-  const onlyHashtags = /^(#[^\s#]+\s*)+$/u.test(raw);
-  const title = ((onlyHashtags ? raw : raw.replace(/(\s+#[^\s#]+)+$/u, "")) || "Video").slice(0, 200);
+  const title = cardTitle(meta.title ?? "");
   const info = [meta.uploader, meta.durationSec ? formatDuration(meta.durationSec) : undefined].filter(Boolean).join(" · ");
   const headerPlain = `🎬 ${title}`;
   const headerHtml = `🎬 <a href="${escapeAttr(url)}"><b>${escapeHtml(title)}</b></a>`;
   const room = CAPTION_BUDGET - headerPlain.length - info.length - 4;
   const description = shortDescription(meta.description ?? "", Math.min(DESCRIPTION_CHARS, Math.max(0, room)));
   const bodyPlain = [info, description].filter(Boolean).join("\n\n");
-  const bodyHtml = [info && escapeHtml(info), description && `<blockquote expandable>${escapeHtml(description)}</blockquote>`].filter(Boolean).join("\n");
+  const bodyHtml = [info && escapeHtml(info), description && `<blockquote expandable>${linkifyEscaped(escapeHtml(description))}</blockquote>`].filter(Boolean).join("\n");
   const html = bodyHtml ? `${headerHtml}\n${bodyHtml}` : headerHtml;
   const plain = bodyPlain ? `${headerPlain}\n${bodyPlain}` : headerPlain;
   return { html, plain, headerHtml, bodyHtml, bodyPlain, captionHtml: html, clipped: false, fullTextHtml: "", media };
+}
+
+/** Titles longer than this are shortened (a phone shows ~25 characters per line under a video). */
+const TITLE_CHARS = 80;
+/** A title made only of hashtags keeps tags up to this length. */
+const HASHTAG_TITLE_CHARS = 40;
+
+/**
+ * A short, readable title: "Beautiful Girls #shorts #model" → "Beautiful Girls"; a title of only
+ * hashtags keeps its first few ("#DailyWearShare #Comfortable… #…" → "#DailyWearShare …"); a lone "#" goes.
+ */
+export function cardTitle(raw: string): string {
+  const clean = raw.replace(/(^|\s)#(?=\s|$)/gu, " ").replace(/\s+/g, " ").trim();
+  const words = clean.split(" ");
+  const tags = words.filter((w) => w.startsWith("#"));
+  if (words.length > 0 && tags.length === words.length) {
+    let kept = "";
+    for (const tag of tags) {
+      const next = kept ? `${kept} ${tag}` : tag;
+      if (next.length > HASHTAG_TITLE_CHARS) break;
+      kept = next;
+    }
+    const first = kept || `${tags[0]!.slice(0, HASHTAG_TITLE_CHARS - 1)}…`;
+    return kept && kept.length < clean.length ? `${first} …` : first;
+  }
+  const title = clean.replace(/(\s+#[^\s#]+)+$/u, "").trim() || "Video";
+  return title.length <= TITLE_CHARS ? title : `${title.slice(0, TITLE_CHARS - 1).trimEnd()}…`;
 }
 
 /** The first lines of a description: links and hashtag walls removed, at most `max` characters. */
