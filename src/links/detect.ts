@@ -46,8 +46,15 @@ function sliceUtf16(text: string, offset: number, length: number): string {
   return text.slice(offset, offset + length);
 }
 
-/** Add a scheme to bare "example.com/x", drop fragments and tracking params; undefined if not http(s). */
-export function normalizeUrl(raw: string): string | undefined {
+/** Forum/search "leaving this site" wrappers: /jump?to=…, /redirect?url=…, google.com/url?q=…. */
+const WRAPPER_PATH = /\/(?:jump|redirect|go|out|away|link|url)\/?$/i;
+const WRAPPER_PARAMS = ["to", "url", "target", "u", "q", "dest", "destination", "redirect", "link"];
+
+/**
+ * Add a scheme to bare "example.com/x", drop fragments and tracking params; undefined if not http(s).
+ * A redirect wrapper becomes the page it points to (the wrapper itself is often blocked or empty).
+ */
+export function normalizeUrl(raw: string, unwrap = true): string | undefined {
   const trimmed = raw.trim();
   const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed}`;
   let url: URL;
@@ -58,6 +65,11 @@ export function normalizeUrl(raw: string): string | undefined {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
   if (url.username || url.password) return undefined;
+  if (unwrap && WRAPPER_PATH.test(url.pathname)) {
+    const target = WRAPPER_PARAMS.map((key) => url.searchParams.get(key)).find((value) => value && /^https?:\/\//i.test(value));
+    const inner = target ? normalizeUrl(target, false) : undefined;
+    if (inner) return inner;
+  }
   url.hash = "";
   const kind = linkKind(url.href);
   for (const key of [...url.searchParams.keys()]) {

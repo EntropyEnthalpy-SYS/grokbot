@@ -480,7 +480,7 @@ export function createBot({
       groups.enable(ctx.chat!.id, ctx.chat && "title" in ctx.chat ? ctx.chat.title : undefined);
       const lines = [
         "✅ Enabled in this group.",
-        "• Mention me, reply to me, or start with “grok,” (or “grok … ?”) to ask something.",
+        "• Mention me, reply to me, or start with “grok” (“grok, …” or “grok analyze this”) to ask something.",
         `• Links: <b>${groups.linkMode(ctx.chat!.id)}</b> — I show what links contain; I comment only when asked (/links auto|mention|off).`,
         `• Translation language: <b>${groups.language(ctx.chat!.id)}</b> (/lang).`,
         `• Privacy: <b>${groups.privacy(ctx.chat!.id)}</b> (/privacy).`,

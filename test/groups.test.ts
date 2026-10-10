@@ -25,10 +25,10 @@ test("addressed by name only at the start of a message", () => {
   // Starting with the word is not enough: the name must be followed by punctuation, CJK text, or nothing.
   for (const text of ["grok 這是真的嗎", "Grok，幫我查", "grok?", "grok", "hi grok what is this"]) assert.equal(isAddressedToBot(msg({ text }), bot), true, text);
   for (const text of ["grok's answer was wrong", "grok is down again lol", "Grok 4.7 is out", "grokbot"]) assert.equal(isAddressedToBot(msg({ text }), bot), false, text);
-  // The bare name followed by words counts when the message ends with a question mark or carries a link.
-  for (const text of ["grok my site is example.org, check https://example.com/ could I learn?", "grok 4.7 or 4.6, which is better？", "grok summarize https://example.com/a"])
+  // The bare name followed by a request counts; a remark about Grok only with a question mark at the end or a link.
+  for (const text of ["grok my site is example.org, check https://example.com/ could I learn?", "grok analyze its performance and help me check its BGP router", "grok 4.7 or 4.6, which is better？", "grok is this true?", "grok can you check this"])
     assert.equal(isAddressedToBot(msg({ text }), bot), true, text);
-  for (const text of ["grok is down? no, it's fine", "grok's link https://example.com is broken"]) assert.equal(isAddressedToBot(msg({ text }), bot), false, text);
+  for (const text of ["grok is down? no, it's fine", "grok's link https://example.com is broken", "grok team shipped a new model", "Grok 4.7 is out"]) assert.equal(isAddressedToBot(msg({ text }), bot), false, text);
 });
 
 test("stripAddress removes the mention and the name prefix", () => {

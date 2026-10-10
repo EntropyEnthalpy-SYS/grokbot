@@ -27,6 +27,14 @@ test("entity offsets work after emoji (UTF-16 units)", () => {
   assert.deepEqual(extractLinks(text, [{ type: "url", offset: 5, length: 15 }]), ["https://e.com/x"]);
 });
 
+test("redirect wrappers become the page they point to; ordinary query links stay", () => {
+  assert.equal(normalizeUrl("https://forum.example/jump?to=https%3A%2F%2Fbench.example%2Fr%2Fabc%3Fx%3D1"), "https://bench.example/r/abc?x=1");
+  assert.equal(normalizeUrl("https://www.google.com/url?q=https://e.com/a&sa=D"), "https://e.com/a");
+  assert.equal(normalizeUrl("https://e.com/jump?to=javascript:alert(1)"), "https://e.com/jump?to=javascript:alert(1)", "not a web target: kept as is");
+  assert.equal(normalizeUrl("https://e.com/login?redirect=https://e.com/home"), "https://e.com/login?redirect=https://e.com/home", "a login page is not a wrapper");
+  assert.equal(normalizeUrl("https://a.example/go?url=https://b.example/jump?to=https://c.example/"), "https://b.example/jump?to=https://c.example/", "one level only");
+});
+
 test("rejects non-web schemes and credentials", () => {
   assert.equal(normalizeUrl("javascript:alert(1)"), undefined);
   assert.equal(normalizeUrl("tg://resolve?domain=x"), undefined);

@@ -387,15 +387,19 @@ export function isJustReaction(message: TgMessage): boolean {
  * after), or "hey/hi grok …".
  */
 const NAME_TRIGGER = /^\s*(?:(?:hey|hi)\s+grok\b[\s,:，：!！?？]*|grok(?:\s*[,:，：!！?？。]+\s*|\s+(?=[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af])|\s*$))/i;
-/** "grok what do you think?", "grok summarize https://…": the bare name counts with a question mark at the end or a link. */
+/** "grok analyze this", "grok what do you think?": the name followed by a request, no comma needed. */
 const NAME_WORD = /^\s*grok\s+/i;
+/** …but not a remark about Grok: "grok is down", "Grok 4.7 is out", "grok team shipped…". */
+const REMARK = /^\s*grok\s+(?:is|isn't|was|wasn't|are|were|has|hasn't|had|have|did|didn't|does|doesn't|can't|cannot|won't|will|would|said|says|told|got|gets|seems|looks|keeps|kept|went|just|also|still|and|or|vs|team|users?|\d)\b/i;
 
 /**
- * Whether the text starts by calling the bot by name. Plain remarks that start with the word
- * ("grok's answer was wrong", "grok is down") don't count.
+ * Whether the text starts by calling the bot by name. Remarks about Grok ("grok's answer was wrong",
+ * "grok is down") don't count unless they end with a question mark or carry a link.
  */
 function callsBotByName(text: string): boolean {
-  return NAME_TRIGGER.test(text) || (NAME_WORD.test(text) && (/[?？]\s*$/.test(text) || /https?:\/\//i.test(text)));
+  if (NAME_TRIGGER.test(text)) return true;
+  if (!NAME_WORD.test(text)) return false;
+  return !REMARK.test(text) || /[?？]\s*$/.test(text) || /https?:\/\//i.test(text);
 }
 
 /**
