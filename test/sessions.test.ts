@@ -416,3 +416,25 @@ test("claims of actions that didn't happen (note, poll, reminder, picture) are c
   assert.equal(falseClaim("好的，记住了。", new Set(["remember"])), undefined, "the tool ran: true");
   assert.equal(falseClaim("投票已发起", new Set(["create_poll"])), undefined);
 });
+
+test("tool steps are reported as they start, including searches Grok runs on its own servers", { timeout: 5000 }, async () => {
+  const db = openDbAt(":memory:");
+  const grok = {
+    model: () => model,
+    streamFn: () => {
+      const stream = createAssistantMessageEventStream();
+      const search = { type: "toolCall", id: "resp_1|ctc_1", name: "x_keyword_search", arguments: {} };
+      const message = { role: "assistant", content: [{ type: "text", text: "Found it." }], api: model.api, provider: model.provider, model: model.id, usage: zero, stopReason: "stop", timestamp: Date.now() } as unknown as AssistantMessage;
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: { ...message, content: [] } });
+        stream.push({ type: "toolcall_start", contentIndex: 0, partial: { ...message, content: [search] } as never });
+        stream.push({ type: "done", reason: "stop", message });
+      });
+      return stream;
+    },
+  };
+  const sessions = new ChatSessions({ db, grok: grok as never, systemPrompt: () => "", tools: () => [] });
+  const steps: string[] = [];
+  await sessions.run("tg:-1", { text: "what's new on X?" }, { onActivity: (name) => steps.push(name) });
+  assert.deepEqual(steps, ["x_keyword_search"]);
+});

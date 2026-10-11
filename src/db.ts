@@ -94,6 +94,33 @@ export function openDbAt(path: string): Db {
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS group_memory_chat ON group_memory (chat_id);
+    -- /watch: things the bot checks every few hours with web/X search, posting only when something is new.
+    CREATE TABLE IF NOT EXISTS watches (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id      INTEGER NOT NULL,
+      thread_id    INTEGER NOT NULL DEFAULT 0,
+      user_id      INTEGER,
+      user_name    TEXT NOT NULL,
+      task         TEXT NOT NULL,
+      every_hours  INTEGER NOT NULL,
+      next_at      INTEGER NOT NULL,
+      state        TEXT NOT NULL DEFAULT '',
+      checks       INTEGER NOT NULL DEFAULT 0,
+      alerts       INTEGER NOT NULL DEFAULT 0,
+      last_error   TEXT,
+      created_at   INTEGER NOT NULL
+    );
+    -- /skill: saved requests a chat runs by name ("grok 早報").
+    CREATE TABLE IF NOT EXISTS skills (
+      chat_id    INTEGER NOT NULL,
+      name       TEXT NOT NULL,
+      prompt     TEXT NOT NULL,
+      user_id    INTEGER,
+      user_name  TEXT NOT NULL,
+      uses       INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (chat_id, name)
+    );
     -- Extracted page text and generated summaries, keyed by normalized URL.
     CREATE TABLE IF NOT EXISTS link_cache (
       url        TEXT PRIMARY KEY,

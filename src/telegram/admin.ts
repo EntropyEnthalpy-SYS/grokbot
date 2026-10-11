@@ -43,7 +43,7 @@ export interface AdminDeps {
   cookies?: CookieStore;
 }
 
-const KIND_LABELS: Record<string, string> = { question: "❓", image: "🖼", tr: "🌐", voice_sec: "🎙 min", card: "🔗", tts: "🔊" };
+const KIND_LABELS: Record<string, string> = { question: "❓", image: "🖼", tr: "🌐", voice_sec: "🎙 min", card: "🔗", tts: "🔊", watch: "👀" };
 
 /** "❓12 · 🖼3 · 🎙 min 4" */
 export function formatCounts(counts: MemberUsage["counts"]): string {
@@ -52,6 +52,14 @@ export function formatCounts(counts: MemberUsage["counts"]): string {
     return `${KIND_LABELS[k]}${k === "voice_sec" ? " " : ""}${value}`;
   });
   return parts.join(" · ") || "nothing yet";
+}
+
+const BARS = "▁▂▃▄▅▆▇█";
+
+/** "▁▃█·▅": one character per value, scaled to the largest; "·" marks zero. */
+export function sparkline(values: readonly number[]): string {
+  const max = Math.max(0, ...values);
+  return values.map((v) => (v <= 0 || max === 0 ? "·" : BARS[Math.min(BARS.length - 1, Math.floor((v / max) * (BARS.length - 1) + 0.5))])).join("");
 }
 
 /** Telegram's own contact picker: the owner chooses people instead of typing ids. */
@@ -503,6 +511,33 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
     const lines = [`<b>📈 Usage, ${span}</b> (${zoneLabel()} days)`, ""];
     if (members.length === 0) lines.push("No usage yet.");
     for (const m of members.slice(0, 20)) lines.push(`<b>${escapeHtml(m.name || String(m.userId))}</b>: ${formatCounts(m.counts)}`);
+    if (days > 1) {
+      // Day by day, oldest first: the trend at a glance (monospace, so the bars line up).
+      const series: [string, number[], (n: number) => string][] = [
+        ["❓", deps.usage.daily("question", days), String],
+        ["🔗", deps.usage.daily("card", days), String],
+        ["🖼", deps.usage.daily("image", days), String],
+        ["👀", deps.usage.daily("watch", days), String],
+        ["🧮", deps.usage.daily("tokens", days), formatTokens],
+      ];
+      const shown = series.filter(([, values]) => values.some((v) => v > 0));
+      if (shown.length) {
+        lines.push("", `<b>Day by day</b> (oldest → today; 🧮 = AI tokens)`);
+        for (const [icon, values, format] of shown) {
+          const total = values.reduce((a, b) => a + b, 0);
+          lines.push(`${icon} <code>${sparkline(values)}</code> ${format(total)}`);
+        }
+      }
+      const chats = deps.usage.chats(days);
+      if (chats.length > 1) {
+        lines.push("", "<b>By chat</b>");
+        const titles = new Map(groups.list().map((g) => [g.chatId, g.title]));
+        for (const c of chats.slice(0, 8)) {
+          const label = c.chatId > 0 ? `💬 private (${members.find((m) => m.userId === c.chatId)?.name || c.chatId})` : `👥 ${titles.get(c.chatId) ?? c.chatId}`;
+          lines.push(`${escapeHtml(label.slice(0, 40))}: ${formatCounts(c.counts)}`);
+        }
+      }
+    }
     const providers = deps.usage.providers(days);
     if (providers.length) {
       lines.push("", "<b>AI providers</b> (requests · tokens in/out)");
@@ -511,7 +546,7 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
         lines.push(`${escapeHtml(name)}: ${p.requests} · ${formatTokens(p.input)} / ${formatTokens(p.output)}`);
       }
     }
-    lines.push("", "❓ questions · 🖼 images · 🌐 /tr · 🎙 voice minutes transcribed · 🔗 link/video cards · 🔊 voice replies");
+    lines.push("", "❓ questions · 🖼 images · 🌐 /tr · 🎙 voice minutes transcribed · 🔗 link/video cards · 🔊 voice replies · 👀 watch checks");
     return { text: lines.join("\n"), keyboard };
   }
 

@@ -2,6 +2,8 @@ import { bilibiliDownloader, createApp } from "./app.ts";
 import { loadConfig, loadDotEnv } from "./config.ts";
 import { createBot, registerCommands, reminderKeyboard, renderReminder } from "./telegram/bot.ts";
 import { deliverDueReminders, ReminderStore } from "./reminders.ts";
+import { checkDueWatches, WatchStore } from "./watches.ts";
+import { SkillStore } from "./skills.ts";
 import { backupCheck, diskCheck, HealthMonitor, memoryCheck, networkCheck, socksCheck, ytdlpAgeCheck, type Check } from "./health.ts";
 import { run } from "./media/run.ts";
 import { UsageStore } from "./usage.ts";
@@ -29,6 +31,8 @@ const cache = new CardCache(db);
 // Each chat's /tz decides what "every day 08:00" means for its reminders.
 const reminders = new ReminderStore(db, (chatId) => groups.timeZone(chatId));
 const usage = new UsageStore(db);
+const watches = new WatchStore(db);
+const skills = new SkillStore(db);
 grok.onUsage = (provider, input, output) => usage.recordTokens(provider, input, output);
 const ops = new OpsClient(`${config.dataDir}/ops`);
 const backupDir = `${config.dataDir}/backups`;
@@ -104,6 +108,8 @@ const bot = createBot({
   sessions,
   groups,
   reminders,
+  watches,
+  skills,
   images,
   memory,
   speakers,
@@ -176,10 +182,27 @@ const reminderTimer = setInterval(() => {
     .finally(() => (delivering = false));
 }, 20_000);
 
+// Watches: one at a time, each a search request; checked every minute.
+let watching = false;
+const watchTimer = setInterval(() => {
+  if (watching) return;
+  watching = true;
+  checkDueWatches(watches, {
+    ask: async (system, prompt) => grok.ask(system, prompt, { search: true }),
+    send: (chatId, html, other) => bot.api.sendMessage(chatId, html, other),
+    isActive: (chatId) => chatId > 0 || groups.isEnabled(chatId),
+    zoneOf: (chatId) => groups.timeZone(chatId),
+    markup: (watch) => ({ inline_keyboard: [[{ text: "⏹ Stop watching", callback_data: `wat:x:${watch.id}` }]] }),
+  }, Date.now(), (watch) => usage.record(watch.chatId, { id: watch.userId ?? undefined, name: watch.userName }, "watch"))
+    .catch((error) => console.error("watches failed:", error))
+    .finally(() => (watching = false));
+}, 60_000);
+
 const shutdown = async (signal: string) => {
   console.log(`${signal} received, stopping`);
   clearInterval(pruneTimer);
   clearInterval(reminderTimer);
+  clearInterval(watchTimer);
   health.stop();
   await bot.stop();
   db.close();
@@ -218,7 +241,9 @@ async function writeScheduledPost(reminder: Reminder): Promise<string> {
   // Only the latest run of each post is worth keeping.
   for (const old of writtenPosts.keys()) if (old.startsWith(`${reminder.id}@`)) writtenPosts.delete(old);
   const now = Date.now();
-  const answer = await grok.ask(SCHEDULED_POST_PROMPT(now, reminders.zone(reminder.chatId)), reminder.text, { search: true });
+  // "/schedule 每天8點 早報": a saved request (/skill) stands in for its name.
+  const task = skills.expand(reminder.chatId, reminder.text).text;
+  const answer = await grok.ask(SCHEDULED_POST_PROMPT(now, reminders.zone(reminder.chatId)), task, { search: true });
   // One message: the first ~3000 characters (HTML tags add a little; Telegram's limit is 4096).
   const body = splitMarkdown(answer, 3000)[0] ?? answer.slice(0, 3000);
   usage.record(reminder.chatId, { id: reminder.userId ?? undefined, name: reminder.userName }, "card");

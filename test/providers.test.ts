@@ -297,8 +297,14 @@ test("panel: usage per member and provider; limits change with buttons; members 
   p.usage.record(-100, { id: 5, name: "Amy" }, "question", 3);
   p.usage.record(-100, { id: 5, name: "Amy" }, "image", 2);
   p.usage.recordTokens("xai", 12_000, 3_000);
+  p.usage.record(-200, { id: 6, name: "Ben" }, "card", 1, Date.now() - 2 * 24 * 3600_000);
   await p.bot.handleUpdate(p.press(OWNER, "adm:use:7"));
   assert.match(lastText(p), /Amy<\/b>: ❓3 · 🖼2/);
+  assert.match(lastText(p), /❓ <code>······█<\/code> 3/, "a 7-day chart, today on the right");
+  assert.match(lastText(p), /🔗 <code>····█··<\/code> 1/);
+  assert.match(lastText(p), /🧮 <code>······█<\/code> 15k/);
+  assert.doesNotMatch(lastText(p), /👀 <code>/, "kinds without use have no chart");
+  assert.match(lastText(p), /By chat<\/b>\n👥 [^\n]+: ❓3 · 🖼2\n👥 -200: 🔗1/);
   assert.match(lastText(p), /Grok: 1 · 12k \/ 3k/);
   await p.bot.handleUpdate(p.press(OWNER, "adm:ln:questionsPerUserHour:+"));
   await p.bot.handleUpdate(p.press(OWNER, "adm:ln:imagesPerUserDay:-"));

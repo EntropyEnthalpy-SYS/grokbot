@@ -32,6 +32,8 @@ export interface TurnHandlers {
   onStart?: () => void;
   onText?: (text: string) => void;
   onTool?: (name: string) => void;
+  /** A tool step began, ours or one Grok runs on its servers (web_search, x_keyword_search…): for a status line. */
+  onActivity?: (name: string) => void;
 }
 
 /**
@@ -175,6 +177,11 @@ export class ChatSessions {
       if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
         text += event.assistantMessageEvent.delta;
         handlers.onText?.(text);
+      }
+      if (event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_start") {
+        const { partial, contentIndex } = event.assistantMessageEvent;
+        const block = partial.content[contentIndex];
+        if (block?.type === "toolCall" && block.name) handlers.onActivity?.(block.name);
       }
       if (event.type === "tool_execution_start") {
         toolsUsed.add(event.toolName);

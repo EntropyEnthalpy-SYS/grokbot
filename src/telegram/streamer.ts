@@ -48,6 +48,8 @@ export class ReplyStreamer {
   readonly #minInitialChars: number;
   #messageId: number | undefined;
   #latest = "";
+  /** What the bot is doing right now ("🔍 Searching X…"), shown under the text so far. */
+  #status = "";
   #shown = "";
   #timer: ReturnType<typeof setTimeout> | undefined;
   #flushing: Promise<void> = Promise.resolve();
@@ -76,9 +78,20 @@ export class ReplyStreamer {
     return this.#draftId !== undefined && this.#failures < MAX_PREVIEW_FAILURES;
   }
 
-  /** Report the full text generated so far. Cheap to call on every token. */
+  /** Report the full text generated so far. Cheap to call on every token. New text ends the status line. */
   update(text: string): void {
+    if (text !== this.#latest) this.#status = "";
     this.#latest = text;
+    this.#schedule();
+  }
+
+  /** Show what the bot is doing ("🔍 Searching X…") until more text arrives; sent even before any text. */
+  status(line: string): void {
+    this.#status = line;
+    this.#schedule();
+  }
+
+  #schedule(): void {
     if (this.#finished || this.#timer || this.#failures >= MAX_PREVIEW_FAILURES) return;
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
@@ -119,8 +132,8 @@ export class ReplyStreamer {
 
   async #flushPreview(): Promise<void> {
     if (this.#finished) return;
+    const preview = previewText([this.#latest.trim(), this.#status].filter(Boolean).join("\n\n"));
     if (this.#draftId !== undefined) {
-      const preview = previewText(this.#latest);
       if (!preview || preview === this.#shown) return;
       try {
         await this.#api.sendMessageDraft!(this.#chatId, this.#draftId, preview, { can_stop: true });
@@ -131,9 +144,8 @@ export class ReplyStreamer {
       }
       return;
     }
-    if (this.#messageId === undefined && this.#latest.trim().length < this.#minInitialChars) return;
-    const preview = previewText(this.#latest);
-    if (preview === this.#shown) return;
+    if (this.#messageId === undefined && !this.#status && this.#latest.trim().length < this.#minInitialChars) return;
+    if (!preview || preview === this.#shown) return;
     try {
       if (this.#messageId === undefined) {
         const sent = await this.#api.sendMessage(this.#chatId, preview, this.#sendOptions(this.#replyTo));
@@ -182,6 +194,18 @@ export class ReplyStreamer {
       ...(replyTo !== undefined ? { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } } : {}),
     };
   }
+}
+
+/** The status line for a tool step: ours (read_link…) or Grok's server-side search (x_keyword_search, web_search…). */
+export function activityLine(tool: string): string {
+  if (/^x_|twitter/i.test(tool)) return "🔍 Searching X…";
+  if (/search|browse/i.test(tool)) return "🔍 Searching the web…";
+  if (tool === "read_link") return "📖 Reading the link…";
+  if (tool === "watch_video") return "🎬 Watching the video…";
+  if (tool === "create_image") return "🎨 Drawing…";
+  if (tool === "create_poll") return "📊 Making the poll…";
+  if (tool === "remember") return "📝 Noting it down…";
+  return "⚙️ Working on it…";
 }
 
 /** Plain-text preview that always fits in one Telegram message. */

@@ -9,11 +9,13 @@ Plain TypeScript on Node 24 (no build step), [grammY](https://grammy.dev), [pi](
 ## What it does
 
 **In groups**
-- **Answers when addressed**: @mention, a reply to the bot, or a message starting with “grok,”. Web and X search (also on ChatGPT/Claude, through Tavily), reading links, watching videos, seeing photos, reading documents (PDF, Word, PowerPoint, text; scanned PDFs as page images).
+- **Answers when addressed**: @mention, a reply to the bot, or a message starting with “grok” (“grok, …”, “grok analyze this”). While it works, the reply shows what it is doing (🔍 Searching X…, 📖 Reading the link…). Web and X search (also on ChatGPT/Claude, through Tavily), reading links, watching videos, seeing photos, reading documents (PDF, Word, PowerPoint, text; scanned PDFs as page images).
 - **Link cards without commentary**: X posts (original media + translation), web pages (title and first lines), YouTube and other videos (the video itself with its title and description); no AI for any of them. A 📝 button under video and web cards adds an AI summary on request, and Douyin, Xiaohongshu, Weibo, Bilibili, Kuaishou, Instagram, Facebook, Threads, Tieba, Douban… through [ParseHub](https://github.com/z-mio/ParseHub).
 - **Voice**: transcripts (+ translation) of voice notes; questions asked by voice get a text and a voice-note answer.
 - **`/tr`** translates a replied message, voice note, document or the text in a photo. **`/img`** or “grok, 畫…” creates or edits images (Grok Imagine).
 - **Reminders** (`/remind`, “grok, 提醒我們…”) confirmed with the time understood, with edit, pause/resume and 💤 snooze; **scheduled posts** the bot writes itself (`/schedule 每天早上8點 台北天氣`); a **time zone per chat** (`/tz`).
+- **Watches** (`/watch every 6h GPT-7 release`, “grok, GPT-7 發布的時候告訴我”): checked every few hours with web/X search, posted only when something is new; one-time events end the watch, every watch ends after 30 days.
+- **Saved requests** (`/skill add 早報 = …`, then “grok 早報” or `/schedule 每天8點 早報`): a chat's own shortcuts, such as a translator, fact-check or chat summary.
 - **Polls** (“grok, 開個投票…”) and **notes** it always remembers (`/lm`, “grok, 記住…”). In groups, ones the AI suggests wait for the asker's ✅, so a web page can't talk it into posting or saving something.
 - **Privacy modes**: `strict` (default for new groups — nothing stored, each question answered on its own) or `normal` (7 days of context and memory).
 
@@ -26,7 +28,7 @@ Plain TypeScript on Node 24 (no build step), [grammY](https://grammy.dev), [pi](
 | 🤖 AI providers | Sign in to Grok / ChatGPT / Claude (or a Claude API key), order them, pick models. If the first fails before answering (quota, expired login, outage), the next answers. |
 | 👥 Groups | Per group: link cards, privacy, language, voice, tidy, who may use the bot, persona, ✋ confirmations, 🕒 time zone. |
 | 🔐 Permissions | Per person: 💬 private chat, ✅ approved (for “approved only” groups), ⭐ trusted (no limits), ⛔ blocked. Add people with Telegram's contact picker; strangers' access requests arrive with Allow/Block buttons. |
-| 📈 Usage · ⚖️ Limits | Usage per member and per provider; adjustable per-member and per-group limits. |
+| 📈 Usage · ⚖️ Limits | Usage per member, chat and provider, with day-by-day charts; adjustable per-member and per-group limits. |
 | 📊 Status · 🩺 Health | Logins, quota, live checks of every dependency. |
 | 🛠 Maintenance | Service status, recent errors, update yt-dlp/ParseHub, restart, backup (without logins) — no SSH needed. |
 

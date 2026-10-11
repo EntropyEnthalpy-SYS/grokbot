@@ -14,6 +14,7 @@ import { RateLimiter } from "../src/telegram/rateLimit.ts";
 import { ReplyStreamer } from "../src/telegram/streamer.ts";
 import { LimitStore, usageDay, UsageStore } from "../src/usage.ts";
 import { PermissionStore } from "../src/permissions.ts";
+import { sparkline } from "../src/telegram/admin.ts";
 
 const HOUR = 3600_000;
 
@@ -44,6 +45,16 @@ test("usage: per-member counts add up per day and window; providers keep tokens 
     { provider: "openai", input: 50, output: 10, requests: 1 },
   ]);
   assert.ok(usage.members(7, now).every((m) => m.userId !== 0), "provider rows never show up as members");
+  // Day by day (oldest first, quiet days 0) and per chat, for the panel's charts.
+  assert.deepEqual(usage.daily("question", 4, now), [0, 0, 0, 3]);
+  assert.deepEqual(usage.daily("image", 4, now), [1, 0, 0, 0]);
+  assert.deepEqual(usage.daily("tokens", 2, now), [0, 2460]);
+  assert.deepEqual(usage.chats(7, now), [
+    { chatId: -1, counts: { question: 2, image: 1 } },
+    { chatId: -2, counts: { question: 1 } },
+  ]);
+  assert.equal(sparkline([0, 1, 4, 8, 2]), "·▂▅█▃");
+  assert.equal(sparkline([0, 0]), "··");
 });
 
 test("limits: defaults, clamped nudges, trusted members; a changed limit applies to the running limiter at once", () => {

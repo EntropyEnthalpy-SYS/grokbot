@@ -9,6 +9,8 @@ import { openDbAt } from "../src/db.ts";
 import { createBot, QUESTIONS_PER_USER_PER_HOUR } from "../src/telegram/bot.ts";
 import { GroupStore } from "../src/telegram/groups.ts";
 import { ReminderStore } from "../src/reminders.ts";
+import { WatchStore } from "../src/watches.ts";
+import { SkillStore } from "../src/skills.ts";
 import { ImageStudio } from "../src/agent/images.ts";
 import { MemoryStore } from "../src/memory.ts";
 import { LimitStore, UsageStore } from "../src/usage.ts";
@@ -54,6 +56,8 @@ function harness(
   const db = openDbAt(":memory:");
   const groups = new GroupStore(db);
   const reminders = new ReminderStore(db, (chatId) => groups.timeZone(chatId));
+  const watches = new WatchStore(db);
+  const skills = new SkillStore(db);
   const memory = new MemoryStore(db);
   const usage = new UsageStore(db);
   const limits = new LimitStore(db);
@@ -101,6 +105,8 @@ function harness(
     sessions: sessions as never,
     groups,
     reminders,
+    watches,
+    skills,
     images,
     memory,
     speakers,
@@ -186,7 +192,7 @@ function harness(
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   };
-  return { bot, calls, runs, until, waitFor, press, actions, groups, reminders, memory, speakers, usage, limits, permissions, polls, asked, created, images, groupText, settle, next: () => ++updateId };
+  return { bot, calls, runs, until, waitFor, press, actions, groups, reminders, watches, skills, memory, speakers, usage, limits, permissions, polls, asked, created, images, groupText, settle, next: () => ++updateId };
 }
 
 test("inline queries reach their handler (they have no chat, unlike every other update)", async () => {
@@ -547,6 +553,51 @@ test("/schedule: owner and trusted members only; it stores an AI-written post", 
   await h.settle();
   const [post] = h.reminders.list(GROUP);
   assert.deepEqual([post?.ai, post?.repeat, post?.text], [true, "daily", "台北天氣和重點新聞"]);
+});
+
+test("/watch and “grok, … 的時候告訴我”: owner and trusted only; one check now, its finding in the reply; no chat answer", async () => {
+  const h = harness({ loggedIn: true, ask: () => '{"state":"GPT-7 has not been announced yet (11 Oct 2026).","new":"","done":false}' });
+  h.groups.enable(GROUP, "Grok bot test");
+  h.groups.setPrivacy(GROUP, "normal");
+  await h.bot.handleUpdate(h.groupText(5, "/watch GPT-7 release"));
+  await h.settle();
+  assert.equal(h.watches.count(GROUP), 0, "a member can't");
+  assert.equal(h.asked.length, 0, "and it costs no AI request");
+  await h.bot.handleUpdate(h.groupText(OWNER, "/watch every 6h GPT-7 release"));
+  await h.settle();
+  const [watch] = h.watches.list(GROUP);
+  assert.deepEqual([watch?.task, watch?.everyHours, watch?.state], ["GPT-7 release", 6, "GPT-7 has not been announced yet (11 Oct 2026)."]);
+  assert.match(h.asked.at(-1)!.system, /first check/);
+  const confirmation = h.calls.filter((c) => c.method === "sendMessage").at(-1)!.payload;
+  assert.match(String(confirmation.text), /Watching: <b>GPT-7 release<\/b>[\s\S]*every 6 h[\s\S]*not been announced/);
+  assert.deepEqual((confirmation.reply_markup as { inline_keyboard: { callback_data: string }[][] }).inline_keyboard[0]![0]!.callback_data, `wat:x:${watch!.id}`);
+
+  const runs = h.runs.length;
+  await h.bot.handleUpdate(h.groupText(OWNER, "grok, OpenAI 發布 GPT-7 的時候告訴我"));
+  await h.settle();
+  assert.equal(h.watches.count(GROUP), 2, "said in words, it's a watch too");
+  assert.equal(h.runs.length, runs, "not answered as a question (that would promise a message that never comes)");
+});
+
+test("/skill: the owner saves a request, anyone runs it by name (with extra words) like a question", async () => {
+  const h = harness({ loggedIn: true });
+  h.groups.enable(GROUP, "Grok bot test");
+  await h.bot.handleUpdate(h.groupText(5, "/skill add 早報 = 搜今天5條AI新聞"));
+  await h.settle();
+  assert.equal(h.skills.count(GROUP), 0, "members can't save");
+  await h.bot.handleUpdate(h.groupText(OWNER, "/skill add 早報 = 搜今天5條AI新聞"));
+  await h.settle();
+  assert.equal(h.skills.get(GROUP, "早報")?.prompt, "搜今天5條AI新聞");
+  await h.bot.handleUpdate(h.groupText(5, "grok 早報 只要加密貨幣"));
+  await h.settle();
+  assert.match(h.runs.at(-1)!.text, /搜今天5條AI新聞\n\nAlso: 只要加密貨幣/);
+  assert.doesNotMatch(h.runs.at(-1)!.text, /grok 早報/);
+  const runs = h.runs.length;
+  await h.bot.handleUpdate(h.groupText(5, "/skill 早報"));
+  await h.settle();
+  assert.equal(h.runs.length, runs + 1);
+  assert.match(h.runs.at(-1)!.text, /搜今天5條AI新聞/);
+  assert.equal(h.skills.get(GROUP, "早報")?.uses, 2);
 });
 
 const STRANGER = 4242;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
-import { ReplyStreamer, type MessageApi } from "../src/telegram/streamer.ts";
+import { activityLine, ReplyStreamer, type MessageApi } from "../src/telegram/streamer.ts";
 
 type Call = { method: "send" | "edit"; id?: number; text: string; html: boolean; replyTo?: number };
 
@@ -88,4 +88,37 @@ test("falls back to plain text when Telegram rejects the HTML", async () => {
   const streamer = new ReplyStreamer(api, 1);
   await streamer.finish("**x**");
   assert.deepEqual(calls, [{ method: "send", text: "**x**", html: false, replyTo: undefined }]);
+});
+
+test("a status line shows what the bot is doing before any text, sits under the text, and the answer replaces it", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const { api, calls } = fakeApi();
+    const streamer = new ReplyStreamer(api, 1, { replyTo: 7, throttleMs: 1000, minInitialChars: 24 });
+    streamer.status(activityLine("x_keyword_search"));
+    mock.timers.tick(1000);
+    await settle();
+    assert.deepEqual(calls.map((c) => [c.method, c.text, c.replyTo]), [["send", "🔍 Searching X…", 7]], "sent at once, though shorter than minInitialChars");
+    streamer.update("我查一下");
+    streamer.status(activityLine("read_link"));
+    mock.timers.tick(1000);
+    await settle();
+    assert.equal(calls.at(-1)?.text, "我查一下\n\n📖 Reading the link…");
+    streamer.update("我查一下。答案是");
+    mock.timers.tick(1000);
+    await settle();
+    assert.equal(calls.at(-1)?.text, "我查一下。答案是", "new text ends the status line");
+    await streamer.finish("Answer");
+    assert.deepEqual(calls.at(-1), { method: "edit", id: 100, text: "Answer", html: true });
+    assert.equal(calls.filter((c) => c.method === "send").length, 1);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("status lines name Grok's own searches and the bot's tools", () => {
+  assert.equal(activityLine("web_search"), "🔍 Searching the web…");
+  assert.equal(activityLine("x_semantic_search"), "🔍 Searching X…");
+  assert.equal(activityLine("watch_video"), "🎬 Watching the video…");
+  assert.equal(activityLine("something_new"), "⚙️ Working on it…");
 });

@@ -36,6 +36,7 @@ const EVERYONE = `<b>⌨️ Commands for everyone</b>
 • <code>/remind edit 3 改到9點</code> · <code>/remind pause 3</code> · <code>/remind resume 3</code>; a due reminder has 💤 snooze buttons
 • <code>/tz</code> → this chat's time zone (owner changes it in groups: <code>/tz Europe/London</code>)
 • <code>/lm</code> notes: <code>/lm add 小明吃素</code> · <code>/lm del 2</code>
+• <code>/skill</code> → saved requests; run one with <code>grok 早報</code> (add words: <code>grok 早報 只要加密貨幣</code>). Owner and ⭐ trusted save them: <code>/skill add 早報 = 搜今天5條AI新聞，每條一行附連結</code> · <code>/skill del 早報</code>
 • <code>/stats</code> → your usage and what's left of your limits
 • <code>/help</code> → this help
 
@@ -53,6 +54,7 @@ const OWNER_GROUP = `<b>👑 Owner commands in a group</b>
 • <code>/tidy on</code> · <code>off</code> → setting replies disappear after 2 min
 • <code>/deletelink on</code> · <code>off</code> → remove link-only messages after their card (bot must be admin)
 • <code>/schedule 每天早上8點 台北天氣和新聞</code> → a post the bot writes itself (you and ⭐ trusted)
+• <code>/watch every 6h GPT-7 release</code> or <code>grok, GPT-7 發布的時候告訴我</code> → checked every few hours with search, posted only when something is new; ends by itself when it happened, or after 30 days · <code>/watches</code> lists · <code>/unwatch 2</code> stops (you and ⭐ trusted)
 • <code>/new</code> · <code>/stop</code> → reset the conversation · stop running answers
 • <code>/forget</code> → delete everything the bot stored for this chat
 

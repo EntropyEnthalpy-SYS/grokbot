@@ -7,8 +7,8 @@ const KEEP_DAYS = 90;
 /** Usage days start at local midnight (TIMEZONE). */
 export { localDay as usageDay };
 
-/** What is counted per member: questions, created images, /tr, voice seconds transcribed, link/video cards, spoken replies. */
-export const USAGE_KINDS = ["question", "image", "tr", "voice_sec", "card", "tts"] as const;
+/** What is counted per member: questions, created images, /tr, voice seconds transcribed, link/video cards, spoken replies, watch checks. */
+export const USAGE_KINDS = ["question", "image", "tr", "voice_sec", "card", "tts", "watch"] as const;
 export type UsageKind = (typeof USAGE_KINDS)[number];
 
 export interface MemberUsage {
@@ -89,6 +89,35 @@ export class UsageStore {
       byProvider.set(provider, entry);
     }
     return [...byProvider.values()].sort((a, b) => b.requests - a.requests);
+  }
+
+  /**
+   * One kind per day over the last `days` days, oldest first, with 0 for quiet days.
+   * "tokens": every provider's input and output tokens together.
+   */
+  daily(kind: UsageKind | "tokens", days: number, now = Date.now()): number[] {
+    const dayList = [...new Set(Array.from({ length: days }, (_, i) => localDay(now - (days - 1 - i) * 86_400_000)))];
+    const filter = kind === "tokens" ? "kind LIKE 'tokens_%'" : "kind = ? AND user_id != 0";
+    const rows = this.#db
+      .prepare(`SELECT day, SUM(amount) AS total FROM usage WHERE day >= ? AND ${filter} GROUP BY day`)
+      .all(...((kind === "tokens" ? [dayList[0]!] : [dayList[0]!, kind]) as [string, ...string[]])) as { day: string; total: number }[];
+    const byDay = new Map(rows.map((r) => [r.day, Number(r.total)]));
+    return dayList.map((day) => byDay.get(day) ?? 0);
+  }
+
+  /** Totals per chat (groups and private chats) over the last `days` days, busiest first. */
+  chats(days: number, now = Date.now()): { chatId: number; counts: Partial<Record<UsageKind, number>> }[] {
+    const rows = this.#db
+      .prepare("SELECT chat_id, kind, SUM(amount) AS total FROM usage WHERE day >= ? AND user_id != 0 AND kind NOT LIKE '%.%' GROUP BY chat_id, kind")
+      .all(localDay(now - (days - 1) * 86_400_000)) as { chat_id: number; kind: UsageKind; total: number }[];
+    const byChat = new Map<number, Partial<Record<UsageKind, number>>>();
+    for (const row of rows) {
+      const counts = byChat.get(Number(row.chat_id)) ?? {};
+      counts[row.kind] = Number(row.total);
+      byChat.set(Number(row.chat_id), counts);
+    }
+    const weight = (c: Partial<Record<UsageKind, number>>) => (c.question ?? 0) + (c.card ?? 0) + (c.image ?? 0) * 3;
+    return [...byChat.entries()].map(([chatId, counts]) => ({ chatId, counts })).sort((a, b) => weight(b.counts) - weight(a.counts));
   }
 
   prune(now = Date.now()): void {

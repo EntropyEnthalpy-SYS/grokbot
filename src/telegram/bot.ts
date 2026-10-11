@@ -56,7 +56,7 @@ import {
   type GroupStore,
   type LinkMode,
 } from "./groups.ts";
-import { ReplyStreamer } from "./streamer.ts";
+import { activityLine, ReplyStreamer } from "./streamer.ts";
 import { RateLimiter } from "./rateLimit.ts";
 import { Semaphore } from "../media/run.ts";
 import {
@@ -67,6 +67,8 @@ import {
   type Reminder,
   type ReminderStore,
 } from "../reminders.ts";
+import { MAX_SKILLS_PER_CHAT, parseSkillDefinition, type SkillStore } from "../skills.ts";
+import { isWatchRequest, MAX_WATCHES_PER_CHAT, parseWatchAnswer, parseWatchRequest, WATCH_PROMPT, type WatchStore } from "../watches.ts";
 
 export const COMMANDS = [
   { command: "admin", description: "Control panel: AI providers, groups, status (owner)" },
@@ -79,6 +81,9 @@ export const COMMANDS = [
   { command: "lm", description: "Notes I always remember: /lm, /lm add …, /lm del <id>" },
   { command: "remind", description: "Set a reminder: /remind Friday 20:00 meeting (edit · pause · resume)" },
   { command: "reminders", description: "List reminders in this chat" },
+  { command: "watch", description: "Tell me when…: /watch every 3h GPT-7 release (owner/trusted)" },
+  { command: "watches", description: "List watches in this chat (/unwatch <id> stops one)" },
+  { command: "skill", description: "Saved requests: /skill, /skill add 早報 = …, then “grok 早報”" },
   { command: "tz", description: "This chat's time zone: /tz Europe/London" },
   { command: "unremind", description: "Cancel a reminder: /unremind <id>" },
   { command: "status", description: "Login, model and SuperGrok quota" },
@@ -134,6 +139,8 @@ export interface BotDeps {
   sessions: ChatSessions;
   groups: GroupStore;
   reminders: ReminderStore;
+  watches: WatchStore;
+  skills: SkillStore;
   images: ImageStudio;
   memory: MemoryStore;
   usage: UsageStore;
@@ -192,7 +199,7 @@ type ChatTarget = {
 /** Commands whose replies only the sender sees in groups (Telegram ephemeral commands, Bot API 10.2). */
 const EPHEMERAL_COMMANDS = new Set([
   "help", "start", "stats", "status", "health", "links", "lang", "voice", "platforms", "privacy", "deletelink",
-  "tidy", "lm", "reminders", "unremind", "new", "stop", "forget", "admin", "tz", "xstyle",
+  "tidy", "lm", "reminders", "unremind", "watches", "unwatch", "new", "stop", "forget", "admin", "tz", "xstyle",
 ]);
 
 export function createBot({
@@ -202,6 +209,8 @@ export function createBot({
   sessions,
   groups,
   reminders,
+  watches,
+  skills,
   images,
   memory,
   speakers,
@@ -503,6 +512,8 @@ export function createBot({
       groups.disable(ctx.chat!.id);
       sessions.forgetChat(ctx.chat!.id);
       reminders.forgetChat(ctx.chat!.id);
+      watches.forgetChat(ctx.chat!.id);
+      skills.forgetChat(ctx.chat!.id);
       memory.forgetChat(ctx.chat!.id);
       return ctx.reply("Disabled. I'll ignore this group until the owner sends /enable.");
     }),
@@ -541,8 +552,8 @@ export function createBot({
   bot.command(
     "forget",
     ownerInGroups(async (ctx) => {
-      const removedReminders = reminders.forgetChat(ctx.chat!.id);
-      const removedNotes = memory.forgetChat(ctx.chat!.id);
+      const removedReminders = reminders.forgetChat(ctx.chat!.id) + watches.forgetChat(ctx.chat!.id);
+      const removedNotes = memory.forgetChat(ctx.chat!.id) + skills.forgetChat(ctx.chat!.id);
       usage.forgetChat(ctx.chat!.id);
       images.forgetChat(ctx.chat!.id);
       if (!isGroup(ctx)) {
@@ -963,6 +974,121 @@ export function createBot({
   });
   bot.callbackQuery("rem:done", (ctx) => ctx.answerCallbackQuery());
 
+  // ⏹ under a watch confirmation or alert.
+  bot.callbackQuery(/^wat:x:(\d+)$/, async (ctx) => {
+    const watch = ctx.chat ? watches.get(ctx.chat.id, Number(ctx.match![1])) : undefined;
+    if (!watch) return ctx.answerCallbackQuery({ text: "That watch was already stopped." });
+    if (!isOwner(ctx) && ctx.from?.id !== watch.userId) return ctx.answerCallbackQuery({ text: "Only the person who set it (or the bot owner) can stop it.", show_alert: true });
+    watches.remove(watch.id);
+    const note = `⏹ Stopped by ${displayName(ctx.from)}`;
+    await ctx.answerCallbackQuery({ text: note });
+    await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [[{ text: note.slice(0, 60), callback_data: "rem:done" }]] } }).catch(() => undefined);
+  });
+
+  bot.command("watch", (ctx) => {
+    if (!ctx.message) return;
+    const message = ctx.message;
+    const request = ctx.match.trim();
+    if (!request) {
+      return ctx.reply(
+        "I check every few hours with web and X search and post here only when something new comes up:\n" +
+          "/watch GPT-7 發布的時候告訴我\n/watch every 6h new releases of github.com/yt-dlp/yt-dlp\n\n" +
+          "Or just say: grok, tell me when … · /watches lists them, /unwatch <id> stops one.",
+      );
+    }
+    background(ctx, () => createWatch(ctx, message, request));
+  });
+
+  bot.command("skill", (ctx) => {
+    if (!ctx.message) return;
+    const message = ctx.message;
+    const chatId = ctx.chat.id;
+    const arg = ctx.match.trim();
+    const verb = arg.split(/\s+/)[0] ?? "";
+    const after = arg.slice(verb.length).trim();
+    if (!arg) {
+      const list = skills.list(chatId);
+      const lines = list.map((k) => `• <b>${escapeHtml(k.name)}</b> → ${escapeHtml(k.prompt.slice(0, 100))}${k.prompt.length > 100 ? "…" : ""} <i>(${k.uses}×)</i>`);
+      return ctx.reply(
+        `${list.length ? `<b>Saved requests here</b>\n${lines.join("\n")}\n\nRun one: <code>grok ${escapeHtml(list[0]!.name)}</code>, or add to it: <code>grok ${escapeHtml(list[0]!.name)} …</code>` : "No saved requests here yet."}\n\n` +
+          "Save one (owner and ⭐ trusted): <code>/skill add 早報 = 搜今天最重要的5條AI新聞，每條一行附連結</code>\nDelete: <code>/skill del 早報</code> · Daily: <code>/schedule 每天早上8點 早報</code>",
+        { parse_mode: "HTML" },
+      );
+    }
+    if (verb === "add" || verb === "del" || verb === "delete") {
+      if (!unlimited(ctx)) return ctx.reply("Only the owner and trusted members can change saved requests.");
+      if (verb !== "add") return ctx.reply(skills.remove(chatId, after) ? `🗑 Deleted ${after}.` : `There's no saved request called ${after} here.`);
+      const parsed = parseSkillDefinition(after);
+      if ("error" in parsed) return ctx.reply(`${parsed.error}, e.g. /skill add 早報 = 搜今天最重要的5條AI新聞`);
+      if (!skills.get(chatId, parsed.name) && skills.count(chatId) >= MAX_SKILLS_PER_CHAT) return ctx.reply(`This chat already has ${MAX_SKILLS_PER_CHAT} saved requests; delete one first.`);
+      skills.set(chatId, parsed.name, parsed.prompt, who(ctx));
+      return ctx.reply(`✅ Saved <b>${escapeHtml(parsed.name)}</b>. Run it with <code>grok ${escapeHtml(parsed.name)}</code>.`, { parse_mode: "HTML" });
+    }
+    // "/skill 早報 …": run it like a question.
+    if (!skills.get(chatId, verb)) return ctx.reply(`There's no saved request called ${verb} here. /skill lists them.`);
+    if (!mayAsk(ctx, chatId)) return refuseOverLimit(ctx, message, threadIdOf(message));
+    if (isGroup(ctx)) return background(ctx, () => answers.use(() => answerInGroup(ctx, message, threadIdOf(message))));
+    return background(ctx, () => chat(ctx, { text: skills.expand(chatId, arg).text }, { key: sessionKey(chatId, 0) }));
+  });
+
+  bot.command("watches", (ctx) => {
+    const list = watches.list(ctx.chat.id);
+    if (list.length === 0) return ctx.reply("Nothing is being watched here. Start with /watch, e.g. /watch GPT-7 release");
+    const now = Date.now();
+    const lines = list.map(
+      (w) =>
+        `#${w.id} 👀 <b>${escapeHtml(w.task.slice(0, 120))}</b>\n   every ${w.everyHours} h · next check ${formatFromNow(w.nextAt, now)} · ${w.alerts} alert(s) · by ${escapeHtml(w.userName)}` +
+        (w.lastError ? `\n   ⚠️ last check failed: ${escapeHtml(w.lastError.slice(0, 100))}` : ""),
+    );
+    return ctx.reply(`${lines.join("\n")}\n\nStop one: <code>/unwatch ${list[0]!.id}</code>`, { parse_mode: "HTML" });
+  });
+
+  bot.command("unwatch", (ctx) => {
+    const watch = watches.get(ctx.chat.id, Number(ctx.match.trim().replace(/^#/, "")));
+    if (!watch) return ctx.reply("No such watch here. See /watches for the ids.");
+    if (!isOwner(ctx) && ctx.from?.id !== watch.userId) return ctx.reply("Only the person who set it (or the bot owner) can stop it.");
+    watches.remove(watch.id);
+    return ctx.reply(`⏹ Stopped watching: ${watch.task}`);
+  });
+
+  /**
+   * /watch and "grok, tell me when…": one check now, so the reply shows what the bot found and
+   * understood; later checks post only news. Each check uses the AI, so owner and trusted members only.
+   */
+  async function createWatch(ctx: Context, message: Message, request: string): Promise<void> {
+    const chatId = ctx.chat!.id;
+    const threadId = threadIdOf(message);
+    const reply = (html: string, extra: Record<string, unknown> = {}) =>
+      ctx.reply(html, {
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+        reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+        ...(threadId ? { message_thread_id: threadId } : {}),
+        ...extra,
+      });
+    if (!unlimited(ctx)) return void (await reply("👀 Watches use the AI every few hours, so only the owner and trusted members can set them."));
+    if (!(await grok.isLoggedIn())) return void (await reply("The bot owner needs to log in to Grok first."));
+    if (watches.count(chatId) >= MAX_WATCHES_PER_CHAT) return void (await reply(`👀 This chat already has ${MAX_WATCHES_PER_CHAT} watches. Stop one first (/watches).`));
+    const { everyHours, task } = parseWatchRequest(request);
+    if (task.length < 3) return void (await reply("👀 What should I watch? e.g. <code>/watch GPT-7 release</code>"));
+    const typing = keepTyping(ctx, threadId);
+    let found;
+    try {
+      found = parseWatchAnswer(await grok.ask(WATCH_PROMPT(Date.now(), groups.timeZone(chatId), undefined), task, { search: true }), undefined);
+    } catch (error) {
+      return void (await reply(`👀 I couldn't start that watch: ${escapeHtml(errorMessage(error))}`));
+    } finally {
+      typing.stop();
+    }
+    usage.record(chatId, who(ctx), "watch");
+    if (found.done) return void (await reply(`👀 That has already happened, so there's nothing to watch:\n${escapeHtml(found.state)}`));
+    const id = watches.add({ chatId, threadId, userId: ctx.from?.id ?? null, userName: displayName(ctx.from), task, everyHours, state: found.state });
+    await reply(
+      `👀 Watching: <b>${escapeHtml(task)}</b>\nI check every ${everyHours} h and post here only when something new comes up.\n\n<b>Now:</b> ${escapeHtml(found.state)}`,
+      { reply_markup: { inline_keyboard: [[{ text: "⏹ Stop", callback_data: `wat:x:${id}` }]] } },
+    );
+  }
+
   // 📝 Summary under a video card: the AI watches the video and replies with a summary in the group's language.
   // The video's link is read back from the card itself (its title), so nothing about the card is stored.
   const summarizing = new Set<string>();
@@ -1102,7 +1228,8 @@ export function createBot({
     // People with private access have the same per-person limits as in groups.
     if (!mayAsk(ctx, ctx.chat.id)) return refuseOverLimit(ctx, message, 0);
     const key = sessionKey(ctx.chat.id, 0);
-    if (message.text) return background(ctx, () => chat(ctx, { text: message.text! }, { key }));
+    if (message.text && isWatchRequest(message.text)) return background(ctx, () => createWatch(ctx, message, message.text!));
+    if (message.text) return background(ctx, () => chat(ctx, { text: skills.expand(ctx.chat.id, message.text!).text }, { key }));
     if (message.photo) {
       return background(ctx, async () => {
         const image = await media.photo(message);
@@ -1219,6 +1346,8 @@ export function createBot({
     // "grok, 提醒我們週五8點開會": set a reminder. If Grok finds no time in it, answer it as a normal question.
     const request = stripAddress(spokenText ?? message.text ?? message.caption ?? "", me);
     if (isReminderRequest(request) && (await createReminder(ctx, message, request)) === undefined) return;
+    // "grok, GPT-7 發布的時候告訴我": a watch. Answering it as a question would promise a message that never comes.
+    if (!spokenText && isWatchRequest(request)) return createWatch(ctx, message, request);
     const strict = groups.privacy(chatId) === "strict";
     const reply = realReply(message);
     const images: ImageContent[] = [];
@@ -1243,7 +1372,8 @@ export function createBot({
         notes.push(`(Couldn't read the attached media: ${errorMessage(error)})`);
       }
     }
-    const text = stripAddress(ownText ?? describeMessage(message), me);
+    // "grok 早報": a saved request (/skill) stands in for its name.
+    const text = skills.expand(chatId, stripAddress(ownText ?? describeMessage(message), me)).text;
     let prompt = buildGroupPrompt({
       title: "title" in ctx.chat! ? ctx.chat.title : undefined,
       context: strict ? [] : groups.contextSinceLastReply(chatId, threadId, message.message_id),
@@ -1577,6 +1707,7 @@ export function createBot({
           onTool: () => {
             toolsUsed = true;
           },
+          onActivity: (name) => streamer.status(activityLine(name)),
         },
         { ephemeral: target.ephemeral },
       );
