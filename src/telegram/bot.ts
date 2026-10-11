@@ -57,6 +57,7 @@ import {
   type LinkMode,
 } from "./groups.ts";
 import { activityLine, ReplyStreamer } from "./streamer.ts";
+import { AlbumCollector } from "./albums.ts";
 import { RateLimiter } from "./rateLimit.ts";
 import { Semaphore } from "../media/run.ts";
 import {
@@ -1209,8 +1210,11 @@ export function createBot({
     return ctx.reply(`Cancelled: ${reminder.text}`);
   });
 
+  // Pictures sent together: each arrives as its own message, only one with the text.
+  const albums = new AlbumCollector<Message>();
   bot.on("message", (ctx) => {
     const message = ctx.message;
+    albums.add(message);
     // grammY matches commands only in text, but people caption a screenshot or voice note with “/tr”.
     const captionTr = message.caption?.match(/^\/tr(?:@(\w+))?(?:\s+([\s\S]*))?$/i);
     if (captionTr && (!captionTr[1] || captionTr[1].toLowerCase() === ctx.me.username.toLowerCase())) {
@@ -1226,14 +1230,18 @@ export function createBot({
     }
     if (isGroup(ctx)) return onGroupMessage(ctx, message);
     // People with private access have the same per-person limits as in groups.
+    // The rest of an album is covered by the answer to its first picture.
+    if (message.photo && !albums.claim(message)) return;
     if (!mayAsk(ctx, ctx.chat.id)) return refuseOverLimit(ctx, message, 0);
     const key = sessionKey(ctx.chat.id, 0);
     if (message.text && isWatchRequest(message.text)) return background(ctx, () => createWatch(ctx, message, message.text!));
     if (message.text) return background(ctx, () => chat(ctx, { text: skills.expand(ctx.chat.id, message.text!).text }, { key }));
     if (message.photo) {
       return background(ctx, async () => {
-        const image = await media.photo(message);
-        await chat(ctx, { text: message.caption || "What's in this image?", images: image ? [image] : [] }, { key });
+        const album = (await albums.complete(message)).filter((m) => m.photo);
+        const pictures = (await Promise.all(album.map((m) => media.photo(m)))).filter((image) => image !== undefined);
+        const caption = album.find((m) => m.caption)?.caption;
+        await chat(ctx, { text: caption || (pictures.length > 1 ? "What's in these images?" : "What's in this image?"), images: pictures }, { key });
       });
     }
     if (voiceOf(message)) {
@@ -1274,6 +1282,8 @@ export function createBot({
     const threadId = threadIdOf(message);
     const normal = groups.privacy(chatId) === "normal";
     if (isAddressedToBot(message, me, (id, sentAt) => groups.isAnswer(chatId, id, sentAt))) {
+      // One answer per album, however many of its pictures count as addressed.
+      if (!albums.claim(message)) return;
       if (!mayAsk(ctx, chatId)) return refuseOverLimit(ctx, message, threadId);
       void ctx.react("👀").catch(() => undefined);
       background(ctx, () => answers.use(() => answerInGroup(ctx, message, threadId)));
@@ -1340,7 +1350,10 @@ export function createBot({
    * Answer a message addressed to the bot. Media in the message and in the
    * message it replies to (photos, voice, videos) is read and given to Grok.
    */
-  async function answerInGroup(ctx: Context, message: Message, threadId: number, spokenText?: string): Promise<void> {
+  async function answerInGroup(ctx: Context, addressed: Message, threadId: number, spokenText?: string): Promise<void> {
+    // An album: wait for all its pictures; the one with the text speaks for it.
+    const album = spokenText === undefined ? await albums.complete(addressed) : [addressed];
+    const message = album.find((m) => m.caption) ?? addressed;
     const me = { id: ctx.me.id, username: ctx.me.username };
     const chatId = ctx.chat!.id;
     // "grok, 提醒我們週五8點開會": set a reminder. If Grok finds no time in it, answer it as a normal question.
@@ -1353,7 +1366,8 @@ export function createBot({
     const images: ImageContent[] = [];
     const notes: string[] = [];
     let ownText = spokenText;
-    for (const source of [message, reply]) {
+    // Every picture of the album, and of the album the question replies to (if it's recent enough to be known).
+    for (const source of [...album, ...(reply ? albums.items(reply) : [])]) {
       if (!source) continue;
       try {
         if (source === message && voiceOf(source) && ownText === undefined) {
@@ -1373,7 +1387,8 @@ export function createBot({
       }
     }
     // "grok 早報": a saved request (/skill) stands in for its name.
-    const text = skills.expand(chatId, stripAddress(ownText ?? describeMessage(message), me)).text;
+    const asked = skills.expand(chatId, stripAddress(ownText ?? describeMessage(message), me)).text;
+    const text = album.length > 1 ? `${asked}\n(${album.length} pictures sent together, all attached)` : asked;
     let prompt = buildGroupPrompt({
       title: "title" in ctx.chat! ? ctx.chat.title : undefined,
       context: strict ? [] : groups.contextSinceLastReply(chatId, threadId, message.message_id),

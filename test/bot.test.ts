@@ -354,6 +354,35 @@ function tempJpeg(): string {
   return path;
 }
 
+test("pictures sent together (an album) are answered once, with every picture, whichever one carries the text", async () => {
+  const h = harness({ loggedIn: true, files: { p1: tempJpeg(), p2: tempJpeg(), p3: tempJpeg(), p4: tempJpeg() } });
+  h.groups.enable(GROUP, "Grok bot test");
+  const now = Math.ceil(Date.now() / 1000) + 1; // after answers started being recorded
+  h.groups.markAnswer(GROUP, [77]);
+  // Replying to an answer with two screenshots: both items reply to it, only the second has the text.
+  const answer = { message_id: 77, date: now, chat: { id: GROUP, type: "supergroup" }, from: { id: 999, is_bot: true, first_name: "Grokky" }, text: "加这条规则" };
+  const item = (id: string, caption?: string) => h.groupText(5, "", { text: undefined, date: now, photo: photoOf(id), media_group_id: "a1", reply_to_message: answer, ...(caption ? { caption } : {}) });
+  await h.bot.handleUpdate(item("p1"));
+  await h.bot.handleUpdate(item("p2", "不通啊"));
+  await h.waitFor(() => h.runs.length > 0);
+  await h.settle();
+  assert.equal(h.runs.length, 1, "one answer for the album");
+  assert.equal(h.runs[0]!.images, 2, "both pictures");
+  assert.match(h.runs[0]!.text, /不通啊\n\(2 pictures sent together, all attached\)/);
+
+  // Private chat: an album gets one answer too, not one per picture.
+  const priv = (id: string, caption?: string): Update => ({
+    update_id: h.next(),
+    message: { message_id: 4000 + h.next(), date: now, chat: { id: OWNER, type: "private", first_name: "O" }, from: { id: OWNER, is_bot: false, first_name: "O" }, photo: photoOf(id), media_group_id: "a2", ...(caption ? { caption } : {}) },
+  } as Update);
+  await h.bot.handleUpdate(priv("p3", "哪个对？"));
+  await h.bot.handleUpdate(priv("p4"));
+  await h.waitFor(() => h.runs.length > 1);
+  await h.settle();
+  assert.equal(h.runs.length, 2);
+  assert.deepEqual([h.runs[1]!.text, h.runs[1]!.images], ["哪个对？", 2]);
+});
+
 test("/tr replying to a screenshot captioned “/tr” translates the image, not the word “/tr”", async () => {
   const h = harness({ loggedIn: true, ask: () => "我測試了 Haiku 5.5", files: { p1: tempJpeg() } });
   h.groups.enable(GROUP, "Grok bot test");
