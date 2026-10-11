@@ -27,6 +27,30 @@ from parsehub import ParseHub
 from parsehub.errors import ParseError, UnknownPlatform
 from parsehub.types import AniFile, ImageFile, LivePhotoFile, VideoFile
 
+
+async def _bili_video_info(self, url: str) -> dict:
+    """Bilibili's /x/web-interface/view/detail now answers HTTP 412 (anti-bot) to servers; /wbi/view
+    still works and returns the same "View" block, the only part ParseHub reads."""
+    bvid = self.get_bvid(url)
+    if not bvid:
+        raise ValueError(f"Invalid url: {url}")
+    response = await self._get_client().get(
+        "https://api.bilibili.com/x/web-interface/wbi/view",
+        params={"bvid": bvid},
+        headers={"Referer": "https://www.bilibili.com/"},
+    )
+    response.raise_for_status()
+    body = response.json()
+    return {**body, "data": {"View": body["data"]}} if body.get("data") else body
+
+
+try:  # ParseHub updates nightly; if this class moves, run without the fix rather than not at all.
+    from parsehub.provider_api.bilibili import BiliAPI
+
+    BiliAPI.get_video_info = _bili_video_info
+except ImportError as error:
+    print(f"Bilibili view fix not applied: {error}", file=sys.stderr)
+
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("PARSEHUB_PORT", "8765"))
 MEDIA_ROOT = Path(os.environ.get("PARSEHUB_MEDIA_DIR", "/var/lib/grokbot/media")).resolve()
