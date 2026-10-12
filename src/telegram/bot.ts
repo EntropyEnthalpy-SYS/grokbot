@@ -62,7 +62,7 @@ import {
 import { activityLine, ReplyStreamer } from "./streamer.ts";
 import { AlbumCollector } from "./albums.ts";
 import type { FileDesk } from "../agent/files.ts";
-import { asksToEditFile, editParagraphs, openForEdit } from "../media/edit.ts";
+import { editParagraphs, openForEdit, wantsEditedFile } from "../media/edit.ts";
 import { isReadableDocument } from "../media/documents.ts";
 import { RateLimiter } from "./rateLimit.ts";
 import { Semaphore } from "../media/run.ts";
@@ -1253,9 +1253,13 @@ export function createBot({
     if (!mayAsk(ctx, ctx.chat.id)) return refuseOverLimit(ctx, message, 0);
     const key = sessionKey(ctx.chat.id, 0);
     if (message.text && isWatchRequest(message.text)) return background(ctx, () => createWatch(ctx, message, message.text!));
-    const fileSource = editableFile(message) ?? (message.reply_to_message && editableFile(message.reply_to_message));
-    if (fileSource && asksToEditFile(message.text ?? message.caption ?? "")) {
-      return background(ctx, () => editFile(ctx, message, fileSource, message.text ?? message.caption ?? "", 0));
+    // A reply to a file: an edited copy, or an answer, depending on what was asked.
+    const repliedFile = message.reply_to_message && editableFile(message.reply_to_message);
+    if (message.text && repliedFile) {
+      return background(ctx, async () => {
+        if (await wantsEditedFile(ask, message.text!)) return editFile(ctx, message, repliedFile, message.text!, 0);
+        await chat(ctx, { text: skills.expand(ctx.chat!.id, message.text!).text }, { key });
+      });
     }
     if (message.text) return background(ctx, () => chat(ctx, { text: skills.expand(ctx.chat.id, message.text!).text }, { key }));
     if (message.photo) {
@@ -1287,6 +1291,9 @@ export function createBot({
     if (message.document) {
       if (!documentOf(message)) return ctx.reply("I can read PDF, Word (.docx), PowerPoint (.pptx), OpenDocument and text files.");
       return background(ctx, async () => {
+        if (message.caption && editableFile(message) && (await wantsEditedFile(ask, message.caption))) {
+          return editFile(ctx, message, message, message.caption, 0);
+        }
         const typing = keepTyping(ctx);
         const doc = await media.document(message).finally(() => typing.stop());
         if (!doc) return;
@@ -1392,7 +1399,7 @@ export function createBot({
     if (!spokenText && isWatchRequest(request)) return createWatch(ctx, message, request);
     // "grok 修正语法，发回文件" with a file, or as a reply to one: an edited copy of the file.
     const fileSource = editableFile(message) ?? (realReply(message) && editableFile(realReply(message)!));
-    if (fileSource && asksToEditFile(request)) return editFile(ctx, message, fileSource, request, threadId);
+    if (fileSource && (await wantsEditedFile(ask, request))) return editFile(ctx, message, fileSource, request, threadId);
     const privacy = groups.privacy(chatId);
     const strict = privacy === "strict";
     const reply = realReply(message);
@@ -1449,6 +1456,8 @@ export function createBot({
     const speak = ownText !== undefined && groups.voiceReply(chatId);
     await chat(ctx, { text: prompt, images }, { key, replyTo: message.message_id, threadId, logGroup: { chatId, threadId }, speak, ephemeral, history });
   }
+
+  const ask = (system: string, prompt: string) => grok.ask(system, prompt);
 
   /** A document the bot can edit (not a picture sent as a file). */
   function editableFile(message: Message): Message | undefined {

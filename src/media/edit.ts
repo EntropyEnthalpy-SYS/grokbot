@@ -31,6 +31,23 @@ export function asksToEditFile(text: string): boolean {
   return /修改|修正|纠正|糾正|改正|润色|潤色|改写|改寫|重写|重寫|校对|校對|(?:翻译|翻譯|译|譯)成|改成|改为|改為|改得|改一下|改下|帮我改|幫我改|发回|發回|回传|回傳|\b(?:edit|fix|rewrite|proofread|polish|correct)\b|\btranslate\b.*\b(?:into|to)\b|\bsend (?:it )?back\b|\bas a file\b/i.test(text);
 }
 
+const ROUTE_SYSTEM_PROMPT =
+  "A user sent a document (Word, PDF, PowerPoint, text, code) to a chat bot, or replied to one, with the request below. " +
+  "Reply EDIT if they want the document itself changed and sent back as a file: corrected, translated, rewritten, " +
+  "reformatted, shortened, completed. Reply ANSWER if they want a reply in the chat: a question about it, a summary, " +
+  "an explanation, an opinion, the meaning of a word in it. Reply with that one word only.";
+
+/**
+ * Edited file back, or an answer in the chat? Clear wording ("修正语法", "proofread it") is decided
+ * at once; for anything else the AI reads the request. Unsure or failing: an answer in the chat.
+ */
+export async function wantsEditedFile(ask: (system: string, prompt: string) => Promise<string>, request: string): Promise<boolean> {
+  if (asksToEditFile(request)) return true;
+  if (!request.trim()) return false;
+  const answer = await ask(ROUTE_SYSTEM_PROMPT, `Request: ${request}`).catch(() => "");
+  return /\bEDIT\b/i.test(answer) && !/\bANSWER\b/i.test(answer);
+}
+
 /** Open a downloaded document for editing. Throws a short, user-presentable error when it can't be. */
 export async function openForEdit(path: string, fileName: string, mimeType: string | undefined, workDir: string): Promise<EditableDocument> {
   const type = documentType(fileName, mimeType);

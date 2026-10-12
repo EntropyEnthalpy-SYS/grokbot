@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { readDocument, zipEntry, zipNew } from "../src/media/documents.ts";
-import { asksToEditFile, editParagraphs, newDocx, openForEdit } from "../src/media/edit.ts";
+import { asksToEditFile, editParagraphs, newDocx, openForEdit, wantsEditedFile } from "../src/media/edit.ts";
 
 const dir = () => mkdtempSync(join(tmpdir(), "edit-"));
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
@@ -13,6 +13,24 @@ const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main
 test("edit requests are told apart from questions about a file", () => {
   for (const t of ["修正语法和格式，发回文件", "把语气改得正式一点", "translate this into English", "proofread it", "帮我改一下", "润色"]) assert.equal(asksToEditFile(t), true, t);
   for (const t of ["总结这个文件", "这份合同讲了什么", "translate this word for me?", "这个版本改了什么", "what changed in v2?"]) assert.equal(asksToEditFile(t), false, t);
+});
+
+test("any wording works: what clear words don't settle, the AI decides", async () => {
+  const asked: string[] = [];
+  const ai = (reply: string | Error) => async (_system: string, prompt: string) => {
+    asked.push(prompt);
+    if (reply instanceof Error) throw reply;
+    return reply;
+  };
+  assert.equal(await wantsEditedFile(ai("ANSWER"), "润色一下"), true);
+  assert.equal(asked.length, 0, "clear wording needs no AI call");
+  assert.equal(await wantsEditedFile(ai("EDIT"), "翻译这个文件"), true);
+  assert.equal(await wantsEditedFile(ai("Answer"), "这个文件讲了什么"), false);
+  assert.deepEqual(asked, ["Request: 翻译这个文件", "Request: 这个文件讲了什么"]);
+  // Unsure or failing: an answer in the chat, never an unwanted rewrite.
+  assert.equal(await wantsEditedFile(ai("EDIT or ANSWER"), "嗯"), false);
+  assert.equal(await wantsEditedFile(ai(new Error("offline")), "make it nicer"), false);
+  assert.equal(await wantsEditedFile(ai("EDIT"), "  "), false);
 });
 
 test("the AI returns only changed paragraphs: unknown numbers and unchanged text are ignored, long files go in batches", async () => {
