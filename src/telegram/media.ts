@@ -133,6 +133,14 @@ export class TelegramMedia {
     return undefined;
   }
 
+  /** Run `use` with a document on local disk (deleted afterwards), e.g. to make an edited copy. */
+  async withDocument<T>(message: Message, use: (path: string, dir: string) => Promise<T>): Promise<T> {
+    const doc = message.document;
+    if (!doc) throw new Error("That message has no file.");
+    if (doc.file_size !== undefined && doc.file_size > DOCUMENT_MAX_BYTES) throw new Error(`That document is larger than ${DOCUMENT_MAX_BYTES / 1024 / 1024} MB.`);
+    return this.#withFile(doc, use);
+  }
+
   /**
    * Run `use` with the file on local disk, never holding it in memory: the
    * local Bot API server's own copy, or a streamed download into a temp folder.

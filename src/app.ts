@@ -1,4 +1,5 @@
 import { ChatSessions } from "./agent/sessions.ts";
+import { FileDesk } from "./agent/files.ts";
 import { groupChatTool, readLinkTool, watchVideoTool } from "./agent/tools.ts";
 import { ImageStudio } from "./agent/images.ts";
 import { MemoryStore } from "./memory.ts";
@@ -43,6 +44,7 @@ export interface App {
   video: VideoReader;
   parsehub?: ParseHubClient;
   images: ImageStudio;
+  files: FileDesk;
   memory: MemoryStore;
   polls: PollDesk;
   /** AI-suggested notes and polls waiting for a person's ✅ (groups with confirmations on). */
@@ -84,6 +86,7 @@ export function createApp(options: {
   const limits = new LimitStore(db);
   const images = new ImageStudio((request) => grok.createImage(request), () => limits.get("imagesPerUserDay"));
   const polls = new PollDesk();
+  const files = new FileDesk();
   const memory = new MemoryStore(db);
   const speakers = new Map<string, { userId?: number; userName: string }>();
   const actions = new ActionDesk();
@@ -101,6 +104,7 @@ export function createApp(options: {
       readLinkTool(reader, parsehub),
       watchVideoTool(video, () => preferredLanguage(groups, key), parsehub),
       images.tool(key),
+      files.tool(key),
       memory.tool(chatIdOf(key), () => speakers.get(key), confirmFor(key)),
       polls.tool(key, confirmFor(key)),
       ...(search.available ? [searchWebTool(search)] : []),
@@ -110,7 +114,7 @@ export function createApp(options: {
     systemExtra: (key) =>
       `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + scriptBlock(groups, chatIdOf(key)) + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key)),
   });
-  return { db, grok, sessions, groups, reader, video, parsehub, images, memory, speakers, polls, actions, limits };
+  return { db, grok, sessions, groups, reader, video, parsehub, images, files, memory, speakers, polls, actions, limits };
 }
 
 /** The group's Chinese script (/lang zh-cn or zh-tw): cards use it, so answers in Chinese should too. */

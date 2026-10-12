@@ -406,15 +406,19 @@ test("claims of actions that didn't happen (note, poll, reminder, picture) are c
   const claims: [string, string][] = [
     ["再发一张。", "image"], ["好的，记住了。", "note"], ["已记下：小明吃素", "note"], ["Noted!", "note"],
     ["投票已发起，大家投吧", "poll"], ["帮你开了一个投票", "poll"], ["好，明天9点会提醒你们。", "reminder"], ["到时叫你", "reminder"], ["I'll remind you at 9.", "reminder"],
+    ["文件已发，保存为 `iplc-ss.md`，用 Obsidian 直接打开。", "file"], ["檔案已附上。", "file"], ["文件在上面，存成 `iplc-ss.md` 即可。", "file"], ["The file is above.", "file"], ["Here's the file.", "file"],
+    ["这里发不出文件。新建笔记，粘贴下面内容。", "file refusal"], ["这里发不出附件。把下面存成 `iplc-ss.md`。", "file refusal"], ["I can't send files here, copy this:", "file refusal"],
   ];
   assert.deepEqual(claims.filter(([t, action]) => falseClaim(t, none)?.action !== action), [], "missed or misread claims");
   const fine = [
     "我没法设提醒，用 /remind 吧。", "我不会记住这个。", "你记住了吗？", "上次的投票结果是拉面赢了。", "要我开个投票吗？",
     "提醒一下，明天放假。", "记得带伞。", "这个设定挺合理。", "Not noted, sorry.", "我记得你说过这个。", "你发起的投票我看到了。",
+    "你发的文件我看过了。", "这个文件讲的是预算。", "把文件拖进 Obsidian 就行。",
   ];
   assert.deepEqual(fine.filter((t) => falseClaim(t, none)), [], "not claims");
   assert.equal(falseClaim("好的，记住了。", new Set(["remember"])), undefined, "the tool ran: true");
   assert.equal(falseClaim("投票已发起", new Set(["create_poll"])), undefined);
+  assert.equal(falseClaim("文件已发。", new Set(["send_file"])), undefined);
 });
 
 test("tool steps are reported as they start, including searches Grok runs on its own servers", { timeout: 5000 }, async () => {

@@ -9,7 +9,7 @@ Plain TypeScript on Node 24 (no build step), [grammY](https://grammy.dev), [pi](
 ## What it does
 
 **In groups**
-- **Answers when addressed**: @mention, a reply to the bot, or a message starting with “grok” (“grok, …”, “grok analyze this”). While it works, the reply shows what it is doing (🔍 Searching X…, 📖 Reading the link…). Web and X search (also on ChatGPT/Claude, through Tavily), reading links, watching videos, seeing photos, reading documents (PDF, Word, PowerPoint, text; scanned PDFs as page images).
+- **Answers when addressed**: @mention, a reply to the bot, or a message starting with “grok” (“grok, …”, “grok analyze this”). While it works, the reply shows what it is doing (🔍 Searching X…, 📖 Reading the link…). Web and X search (also on ChatGPT/Claude, through Tavily), reading links, watching videos, seeing photos, reading documents (PDF, Word, PowerPoint, text; scanned PDFs as page images), and **editing them**: “grok 修正语法，发回文件” as a reply to a file sends back an edited copy with what changed (Word keeps its formatting; PDF and PowerPoint come back as Word).
 - **Link cards without commentary**: X posts (original media + translation), web pages (title and first lines), YouTube and other videos (the video itself with its title and description); no AI for any of them. A 📝 button under video and web cards adds an AI summary on request, and Douyin, Xiaohongshu, Weibo, Bilibili, Kuaishou, Instagram, Facebook, Threads, Tieba, Douban… through [ParseHub](https://github.com/z-mio/ParseHub).
 - **Voice**: transcripts (+ translation) of voice notes; questions asked by voice get a text and a voice-note answer.
 - **`/tr`** translates a replied message, voice note, document or the text in a photo. **`/img`** or “grok, 畫…” creates or edits images (Grok Imagine).
@@ -17,7 +17,7 @@ Plain TypeScript on Node 24 (no build step), [grammY](https://grammy.dev), [pi](
 - **Watches** (`/watch every 6h GPT-7 release`, “grok, GPT-7 發布的時候告訴我”): checked every few hours with web/X search, posted only when something is new; one-time events end the watch, every watch ends after 30 days.
 - **Saved requests** (`/skill add 早報 = …`, then “grok 早報” or `/schedule 每天8點 早報`): a chat's own shortcuts, such as a translator, fact-check or chat summary.
 - **Polls** (“grok, 開個投票…”) and **notes** it always remembers (`/lm`, “grok, 記住…”). In groups, ones the AI suggests wait for the asker's ✅, so a web page can't talk it into posting or saving something.
-- **Privacy modes**: `strict` (default for new groups — nothing stored, each question answered on its own), `focused` (the group chat goes to the AI only for questions about it, like “grok tldr”, or when the AI asks to read it; follow-ups remember the last few answers; 1 day stored) or `normal` (recent chat with every question; 7 days of context and memory). Keys, passwords, logins, emails, phone and card numbers in others' messages are hidden before anything goes to the AI.
+- **Privacy modes**: `strict` (default for new groups — nothing stored, each question answered on its own), `focused` (the group chat goes to the AI only for questions about it, like “grok tldr”, or when the AI asks to read it; follow-ups remember the last few answers; 1 day stored) or `normal` (recent chat with every question; the group's conversation with the bot keeps its last 20 questions from the past day; 7 days of chat log and notes). Keys, passwords, logins, emails, phone and card numbers in others' messages are hidden before anything goes to the AI.
 
 **In private chats** (the owner, plus people the owner allows): the same assistant with its own conversation, streamed as a Telegram draft with a Stop button.
 
@@ -71,7 +71,7 @@ All settings are environment variables; see [`.env.example`](.env.example). Only
 
 ## Data and privacy
 
-- Stored: settings, notes, reminders, usage counts (no content), permissions, provider logins, the last 7 days of conversations with the bot in private chats and `normal` groups (older turns are dropped even while a chat stays active), and 7 days of group messages in `normal` groups. `strict` groups store neither. `/forget` deletes a chat's data; `/disable` removes a group.
+- Stored: settings, notes, reminders, usage counts (no content), permissions, provider logins, the last 7 days of private conversations with the bot and the last day (up to 20 questions) of a group's conversation with it (older turns are dropped even while a chat stays active), and 7 days of group messages in `normal` groups. `strict` groups store neither. `/forget` deletes a chat's data; `/disable` removes a group.
 - `strict` groups store no messages and send Grok only the question and the message it replies to.
 - Backups from `/admin` exclude logins and API keys.
 - Requests are sent with `store: false`. Check your provider's data settings (e.g. grok.com → Settings → Data Controls).

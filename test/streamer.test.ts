@@ -122,3 +122,22 @@ test("status lines name Grok's own searches and the bot's tools", () => {
   assert.equal(activityLine("watch_video"), "🎬 Watching the video…");
   assert.equal(activityLine("something_new"), "⚙️ Working on it…");
 });
+
+test("“Too Many Requests” on the final answer: it waits as long as Telegram says and sends it anyway", async () => {
+  const { api, calls } = fakeApi();
+  let refused = 0;
+  const edit = api.editMessageText.bind(api);
+  api.editMessageText = async (chat, id, text, other) => {
+    if (other?.parse_mode && refused++ === 0) throw { error_code: 429, description: "Too Many Requests: retry after 0", parameters: { retry_after: 0 } };
+    return edit(chat, id, text, other);
+  };
+  const streamer = new ReplyStreamer(api, 1, { throttleMs: 10, minInitialChars: 1 });
+  streamer.update("a long answer in progress");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const started = Date.now();
+  const ids = await streamer.finish("**Done**");
+  assert.deepEqual(ids, [100]);
+  assert.equal(refused, 2, "refused once, then accepted");
+  assert.ok(Date.now() - started >= 900, "waited before retrying");
+  assert.deepEqual(calls.at(-1), { method: "edit", id: 100, text: "<b>Done</b>", html: true });
+});

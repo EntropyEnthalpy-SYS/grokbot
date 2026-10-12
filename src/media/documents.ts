@@ -1,6 +1,6 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { inflateRawSync } from "node:zlib";
+import { crc32, deflateRawSync, inflateRawSync } from "node:zlib";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { capText } from "../links/reader.ts";
 import { run } from "./run.ts";
@@ -36,9 +36,9 @@ export function isReadableDocument(fileName: string | undefined, mimeType: strin
   return documentType(fileName, mimeType) !== undefined;
 }
 
-type DocType = "pdf" | "docx" | "pptx" | "odt" | "text";
+export type DocType = "pdf" | "docx" | "pptx" | "odt" | "text";
 
-function documentType(fileName = "", mimeType = ""): DocType | undefined {
+export function documentType(fileName = "", mimeType = ""): DocType | undefined {
   const ext = fileName.toLowerCase().split(".").pop() ?? "";
   if (ext === "pdf" || mimeType === "application/pdf") return "pdf";
   if (ext === "docx" || mimeType.includes("wordprocessingml")) return "docx";
@@ -129,7 +129,7 @@ export function xmlText(xml: string, ns: string): string {
     .trim();
 }
 
-function decodeXml(text: string): string {
+export function decodeXml(text: string): string {
   return text.replace(/&(#x[0-9a-f]+|#\d+|lt|gt|amp|quot|apos);/gi, (_, code: string) => {
     const lower = code.toLowerCase();
     if (lower.startsWith("#x")) return String.fromCodePoint(parseInt(lower.slice(2), 16));
@@ -138,7 +138,7 @@ function decodeXml(text: string): string {
   });
 }
 
-type ZipEntry = { name: string; method: number; compressedSize: number; size: number; localOffset: number };
+type ZipEntry = { name: string; method: number; crc: number; compressedSize: number; size: number; localOffset: number };
 
 /** The central directory of a zip file (Office documents are zips). */
 function zipDirectory(zip: Buffer): ZipEntry[] {
@@ -160,6 +160,7 @@ function zipDirectory(zip: Buffer): ZipEntry[] {
     entries.push({
       name: zip.toString("utf8", at + 46, at + 46 + nameLength),
       method: zip.readUInt16LE(at + 10),
+      crc: zip.readUInt32LE(at + 16),
       compressedSize: zip.readUInt32LE(at + 20),
       size: zip.readUInt32LE(at + 24),
       localOffset: zip.readUInt32LE(at + 42),
@@ -173,15 +174,84 @@ function zipNames(zip: Buffer): string[] {
   return zipDirectory(zip).map((entry) => entry.name);
 }
 
+/** An entry's stored (possibly compressed) bytes. */
+function rawEntry(zip: Buffer, entry: ZipEntry): Buffer {
+  const local = entry.localOffset;
+  if (zip.readUInt32LE(local) !== 0x04034b50) throw new Error("That document is damaged (not a valid Office file).");
+  const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+  return zip.subarray(start, start + entry.compressedSize);
+}
+
+type ZipFile = { name: string; method: number; crc: number; size: number; data: Buffer };
+
+/** Write a zip (no data descriptors, no extra fields). */
+function writeZip(files: readonly ZipFile[]): Buffer {
+  const locals: Buffer[] = [];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+  for (const file of files) {
+    const name = Buffer.from(file.name, "utf8");
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6); // UTF-8 names
+    local.writeUInt16LE(file.method, 8);
+    local.writeUInt32LE(file.crc >>> 0, 14);
+    local.writeUInt32LE(file.data.length, 18);
+    local.writeUInt32LE(file.size, 22);
+    local.writeUInt16LE(name.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(file.method, 10);
+    central.writeUInt32LE(file.crc >>> 0, 16);
+    central.writeUInt32LE(file.data.length, 20);
+    central.writeUInt32LE(file.size, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    locals.push(local, name, file.data);
+    centrals.push(central, name);
+    offset += 30 + name.length + file.data.length;
+  }
+  const directory = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(files.length, 8);
+  end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, directory, end]);
+}
+
+function deflated(name: string, content: string): ZipFile {
+  const raw = Buffer.from(content, "utf8");
+  return { name, method: 8, crc: crc32(raw), size: raw.length, data: deflateRawSync(raw) };
+}
+
+/** A zip with some files' contents replaced; everything else is copied byte for byte. */
+export function zipReplace(zip: Buffer, replacements: Record<string, string>): Buffer {
+  return writeZip(
+    zipDirectory(zip).map((entry) =>
+      entry.name in replacements
+        ? deflated(entry.name, replacements[entry.name]!)
+        : { name: entry.name, method: entry.method, crc: entry.crc, size: entry.size, data: rawEntry(zip, entry) },
+    ),
+  );
+}
+
+/** A new zip from text files. */
+export function zipNew(files: Record<string, string>): Buffer {
+  return writeZip(Object.entries(files).map(([name, content]) => deflated(name, content)));
+}
+
 /** One file from a zip, as UTF-8 text. */
 export function zipEntry(zip: Buffer, name: string): string {
   const entry = zipDirectory(zip).find((e) => e.name === name);
   if (!entry) throw new Error("That document is damaged or not the format its name says.");
   if (entry.size > ZIP_ENTRY_MAX_BYTES) throw new Error("That document is too large to read.");
-  const local = entry.localOffset;
-  if (zip.readUInt32LE(local) !== 0x04034b50) throw new Error("That document is damaged (not a valid Office file).");
-  const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
-  const data = zip.subarray(start, start + entry.compressedSize);
+  const data = rawEntry(zip, entry);
   if (entry.method === 0) return data.toString("utf8");
   if (entry.method === 8) return inflateRawSync(data, { maxOutputLength: ZIP_ENTRY_MAX_BYTES }).toString("utf8");
   throw new Error("That document uses a compression I can't read.");

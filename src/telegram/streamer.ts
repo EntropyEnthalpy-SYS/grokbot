@@ -55,6 +55,8 @@ export class ReplyStreamer {
   #flushing: Promise<void> = Promise.resolve();
   #failures = 0;
   #finished = false;
+  /** Telegram said "Too Many Requests": no preview edits before this time. */
+  #pausedUntil = 0;
   readonly #draftId: number | undefined;
 
   constructor(api: MessageApi, chatId: number, options: StreamerOptions = {}) {
@@ -96,7 +98,7 @@ export class ReplyStreamer {
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
       this.#flushing = this.#flushing.then(() => this.#flushPreview());
-    }, this.#throttleMs);
+    }, Math.max(this.#throttleMs, this.#pausedUntil - Date.now()));
   }
 
   /** Replace the preview with the final formatted reply. Returns the ids of all messages used. */
@@ -156,11 +158,34 @@ export class ReplyStreamer {
       this.#shown = preview;
       this.#failures = 0;
     } catch (error) {
-      if (!isNotModified(error)) this.#failures++;
+      const wait = retryAfter(error);
+      if (wait !== undefined) this.#pausedUntil = Date.now() + wait * 1000;
+      else if (!isNotModified(error)) this.#failures++;
     }
   }
 
   async #sendFormatted(html: string, plain: string, replyTo: number | undefined): Promise<number> {
+    return this.#patient(() => this.#sendFormattedOnce(html, plain, replyTo));
+  }
+
+  async #editFormatted(messageId: number, html: string, plain: string): Promise<void> {
+    return this.#patient(() => this.#editFormattedOnce(messageId, html, plain));
+  }
+
+  /** The final answer must arrive: after "Too Many Requests", wait as long as Telegram says (up to a minute) and try again. */
+  async #patient<T>(call: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await call();
+      } catch (error) {
+        const wait = retryAfter(error);
+        if (wait === undefined || wait > 60 || attempt >= 2) throw error;
+        await new Promise((resolve) => setTimeout(resolve, (wait + 1) * 1000));
+      }
+    }
+  }
+
+  async #sendFormattedOnce(html: string, plain: string, replyTo: number | undefined): Promise<number> {
     try {
       const sent = await this.#api.sendMessage(this.#chatId, html, { ...this.#sendOptions(replyTo), parse_mode: "HTML" });
       return sent.message_id;
@@ -171,7 +196,7 @@ export class ReplyStreamer {
     }
   }
 
-  async #editFormatted(messageId: number, html: string, plain: string): Promise<void> {
+  async #editFormattedOnce(messageId: number, html: string, plain: string): Promise<void> {
     try {
       await this.#api.editMessageText(this.#chatId, messageId, html, { parse_mode: "HTML", link_preview_options: NO_PREVIEW });
     } catch (error) {
@@ -218,6 +243,13 @@ export function previewText(text: string): string {
 function description(error: unknown): string {
   const value = (error as { description?: unknown; message?: unknown } | null) ?? {};
   return String(value.description ?? value.message ?? "");
+}
+
+/** Seconds Telegram asks to wait after "429 Too Many Requests"; undefined for other errors. */
+function retryAfter(error: unknown): number | undefined {
+  const value = error as { error_code?: number; parameters?: { retry_after?: number } } | null;
+  if (value?.error_code !== 429 && !/too many requests/i.test(description(error))) return undefined;
+  return value?.parameters?.retry_after ?? Number(description(error).match(/retry after (\d+)/i)?.[1] ?? 5);
 }
 
 function isNotModified(error: unknown): boolean {

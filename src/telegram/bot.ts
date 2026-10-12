@@ -61,6 +61,9 @@ import {
 } from "./groups.ts";
 import { activityLine, ReplyStreamer } from "./streamer.ts";
 import { AlbumCollector } from "./albums.ts";
+import type { FileDesk } from "../agent/files.ts";
+import { asksToEditFile, editParagraphs, openForEdit } from "../media/edit.ts";
+import { isReadableDocument } from "../media/documents.ts";
 import { RateLimiter } from "./rateLimit.ts";
 import { Semaphore } from "../media/run.ts";
 import {
@@ -114,6 +117,8 @@ const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 /** Focused privacy: questions and answers kept for follow-ups. */
 const FOCUSED_TURNS = 6;
+/** Normal privacy: the group's shared conversation with the bot keeps this many questions and answers. */
+const NORMAL_TURNS = 20;
 /** /tidy: how long setting replies stay. */
 const TIDY_DELAY_MS = 2 * 60 * 1000;
 /** AI-written scheduled posts per chat (each run uses the AI). */
@@ -149,6 +154,8 @@ export interface BotDeps {
   watches: WatchStore;
   skills: SkillStore;
   images: ImageStudio;
+  /** Files the AI makes with send_file, posted after its answer. */
+  files: FileDesk;
   memory: MemoryStore;
   usage: UsageStore;
   limits: LimitStore;
@@ -221,6 +228,7 @@ export function createBot({
   watches,
   skills,
   images,
+  files,
   memory,
   speakers,
   usage,
@@ -563,19 +571,21 @@ export function createBot({
   bot.command(
     "forget",
     ownerInGroups(async (ctx) => {
-      const removedReminders = reminders.forgetChat(ctx.chat!.id) + watches.forgetChat(ctx.chat!.id);
-      const removedNotes = memory.forgetChat(ctx.chat!.id) + skills.forgetChat(ctx.chat!.id);
+      // Chat data only: saved requests (/skill) are settings and stay (/skill del removes one).
+      const removedReminders = reminders.forgetChat(ctx.chat!.id);
+      const removedWatches = watches.forgetChat(ctx.chat!.id);
+      const removedNotes = memory.forgetChat(ctx.chat!.id);
       usage.forgetChat(ctx.chat!.id);
       images.forgetChat(ctx.chat!.id);
+      const rest = `${removedReminders} reminder(s), ${removedWatches} watch(es) and ${removedNotes} note(s)`;
+      const kept = skills.count(ctx.chat!.id) ? ` Saved requests (/skill) are kept.` : "";
       if (!isGroup(ctx)) {
         sessions.forgetChat(ctx.chat!.id);
-        return ctx.reply(`🧹 Our private conversation history, ${removedReminders} reminder(s) and ${removedNotes} note(s) are deleted.`);
+        return ctx.reply(`🧹 Our private conversation history, ${rest} are deleted.${kept}`);
       }
       const logged = groups.forget(ctx.chat!.id);
       const conversations = sessions.forgetChat(ctx.chat!.id);
-      return ctx.reply(
-        `🧹 Deleted ${logged} logged messages, ${conversations} stored conversation(s), ${removedReminders} reminder(s) and ${removedNotes} note(s) for this group.`,
-      );
+      return ctx.reply(`🧹 Deleted ${logged} logged messages, ${conversations} stored conversation(s), ${rest} for this group.${kept}`);
     }),
   );
 
@@ -1243,6 +1253,10 @@ export function createBot({
     if (!mayAsk(ctx, ctx.chat.id)) return refuseOverLimit(ctx, message, 0);
     const key = sessionKey(ctx.chat.id, 0);
     if (message.text && isWatchRequest(message.text)) return background(ctx, () => createWatch(ctx, message, message.text!));
+    const fileSource = editableFile(message) ?? (message.reply_to_message && editableFile(message.reply_to_message));
+    if (fileSource && asksToEditFile(message.text ?? message.caption ?? "")) {
+      return background(ctx, () => editFile(ctx, message, fileSource, message.text ?? message.caption ?? "", 0));
+    }
     if (message.text) return background(ctx, () => chat(ctx, { text: skills.expand(ctx.chat.id, message.text!).text }, { key }));
     if (message.photo) {
       return background(ctx, async () => {
@@ -1376,6 +1390,9 @@ export function createBot({
     if (isReminderRequest(request) && (await createReminder(ctx, message, request)) === undefined) return;
     // "grok, GPT-7 發布的時候告訴我": a watch. Answering it as a question would promise a message that never comes.
     if (!spokenText && isWatchRequest(request)) return createWatch(ctx, message, request);
+    // "grok 修正语法，发回文件" with a file, or as a reply to one: an edited copy of the file.
+    const fileSource = editableFile(message) ?? (realReply(message) && editableFile(realReply(message)!));
+    if (fileSource && asksToEditFile(request)) return editFile(ctx, message, fileSource, request, threadId);
     const privacy = groups.privacy(chatId);
     const strict = privacy === "strict";
     const reply = realReply(message);
@@ -1427,9 +1444,53 @@ export function createBot({
     // never written to disk. Focused otherwise: the last few questions and answers of the day, for follow-ups.
     const ephemeral = strict || (privacy === "focused" && withChat);
     const key = ephemeral ? `${sessionKey(chatId, threadId)}:q${message.message_id}` : sessionKey(chatId, threadId);
-    const history = privacy === "focused" && !ephemeral ? { turns: FOCUSED_TURNS, maxAgeMs: DAY } : undefined;
+    // The whole group shares one conversation with the bot: keep it to the latest questions of the day.
+    const history = ephemeral ? undefined : { turns: privacy === "focused" ? FOCUSED_TURNS : NORMAL_TURNS, maxAgeMs: DAY };
     const speak = ownText !== undefined && groups.voiceReply(chatId);
     await chat(ctx, { text: prompt, images }, { key, replyTo: message.message_id, threadId, logGroup: { chatId, threadId }, speak, ephemeral, history });
+  }
+
+  /** A document the bot can edit (not a picture sent as a file). */
+  function editableFile(message: Message): Message | undefined {
+    const doc = message.document;
+    return doc && isReadableDocument(doc.file_name, doc.mime_type) ? message : undefined;
+  }
+
+  /**
+   * Send back an edited copy of a document, with a short list of what changed. The file's text goes
+   * to the AI in a one-off request: it isn't kept in the chat's conversation.
+   */
+  async function editFile(ctx: Context, message: Message, source: Message, request: string, threadId: number): Promise<void> {
+    const chatId = ctx.chat!.id;
+    const thread = threadId ? { message_thread_id: threadId } : {};
+    const replyTo = { reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true }, ...thread };
+    if (!(await grok.isLoggedIn())) return void (await ctx.reply("The bot owner needs to log in to Grok first.", replyTo));
+    const fileName = source.document!.file_name ?? "document.txt";
+    const status = await ctx.reply(`✏️ Editing ${fileName}…`, replyTo);
+    const typing = keepTyping(ctx, threadId);
+    usage.record(chatId, who(ctx), "question");
+    try {
+      const result = await media.withDocument(source, async (path, dir) => {
+        const doc = await openForEdit(path, fileName, source.document!.mime_type, dir);
+        const { edits, summary } = await editParagraphs((system, prompt) => grok.ask(system, prompt), doc.paragraphs, request);
+        return { doc, edits, summary, file: edits.size ? doc.build(edits) : undefined };
+      });
+      const points = result.summary.map((line) => `• ${escapeHtml(line)}`).join("\n");
+      if (!result.file) {
+        await bot.api.editMessageText(chatId, status.message_id, `✏️ No changes made to ${escapeHtml(fileName)}.${points ? `\n${points}` : ""}`, { parse_mode: "HTML" });
+        return;
+      }
+      const caption = `✏️ <b>${escapeHtml(result.doc.name)}</b> · ${result.edits.size} paragraph${result.edits.size === 1 ? "" : "s"} changed\n${points}`.slice(0, 1000);
+      const sent = await bot.api.sendDocument(chatId, new InputFile(result.file, result.doc.name), { caption, parse_mode: "HTML", ...replyTo });
+      await bot.api.deleteMessage(chatId, status.message_id).catch(() => undefined);
+      if (isGroup(ctx)) logBotMessage(ctx, chatId, threadId, sent.message_id, `[edited file ${result.doc.name}]\n${result.summary.join("\n")}`);
+    } catch (error) {
+      await bot.api
+        .editMessageText(chatId, status.message_id, `⚠️ I couldn't edit ${fileName}: ${errorMessage(error)}`)
+        .catch(() => undefined);
+    } finally {
+      typing.stop();
+    }
   }
 
   /** Transcribe a group voice note (with a translation when it's in another language). "grok, …" by voice is a question. */
@@ -1724,6 +1785,7 @@ export function createBot({
     let finalText: string | undefined;
     let ids: number[] = [];
     let imageTurn: ReturnType<ImageStudio["begin"]> | undefined;
+    let fileTurn: ReturnType<FileDesk["begin"]> | undefined;
     let toolsUsed = false;
     // This turn's author for the remember tool. The next question in the chat may start before this
     // one's cleanup runs, so cleanup removes only our own entry.
@@ -1735,6 +1797,7 @@ export function createBot({
         {
           onStart: () => {
             imageTurn = images.begin(target.key, { userId: ctx.from?.id, unlimited: isOwner(ctx), attached: input.images });
+            fileTurn = files.begin(target.key);
             speakers.set(target.key, speaker);
           },
           onText: (text) => {
@@ -1781,6 +1844,15 @@ export function createBot({
         await ctx.reply(`⚠️ Couldn't post the image: ${errorMessage(error)}`).catch(() => undefined);
       });
       if (created.length) usage.record(chatId, who(ctx), "image", created.length);
+      for (const file of fileTurn ? files.end(fileTurn) : []) {
+        await bot.api
+          .sendDocument(chatId, new InputFile(file.data, file.name), {
+            ...(target.replyTo ? { reply_parameters: { message_id: target.replyTo, allow_sending_without_reply: true } } : {}),
+            ...(target.threadId ? { message_thread_id: target.threadId } : {}),
+          })
+          .then((sent) => target.logGroup && logBotMessage(ctx, target.logGroup.chatId, target.logGroup.threadId, sent.message_id, `[file ${file.name}]`))
+          .catch(async (error) => void (await ctx.reply(`⚠️ Couldn't send ${file.name}: ${errorMessage(error)}`).catch(() => undefined)));
+      }
     }
     if (target.speak && finalText) {
       await speakReply(ctx, finalText, target).catch((error) => console.warn(`voice reply failed: ${errorMessage(error)}`));
@@ -1879,7 +1951,7 @@ export function privacyText(mode: PrivacyMode): string {
     : [
         "🔓 <b>Privacy: normal</b>",
         "• Group messages are stored on the bot's server for 7 days.",
-        "• When someone asks me, Grok also sees up to 30 recent messages (last 24 h) and earlier questions to me (7 days).",
+        "• When someone asks me, Grok also sees up to 30 recent messages (last 24 h) and the group's last 20 questions to me and my answers (1 day).",
         "• Voice notes are transcribed automatically (/voice).",
         "",
         "Owner: <code>/privacy strict</code> stops this and deletes what is stored. <code>/forget</code> deletes it without changing the mode.",

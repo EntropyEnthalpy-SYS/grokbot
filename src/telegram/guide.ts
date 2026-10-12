@@ -17,6 +17,8 @@ In a group it stays quiet until addressed: <b>@mention</b> it, <b>reply</b> to o
 • reply to a link: <code>grok, 重點是什麼？</code> → reads the link
 • reply to a photo/video: <code>grok, 這是哪裡？</code> → looks at it
 • reply to a PDF/Word/PowerPoint file: <code>grok, 總結</code> → reads it (in private chat, just send the file)
+• <code>grok 做成 markdown 文件</code> (also as a reply to my message) → I send a file: Markdown, text, code, configs, CSV or Word
+• reply to a file: <code>grok 修正語法，發回文件</code> or <code>grok translate this into English</code> → the edited file comes back with what changed (Word keeps its formatting; PDF/PowerPoint come back as Word)
 • <code>grok, 畫一隻戴太空頭盔的柴犬</code> → creates an image
 • reply to a photo: <code>grok, 改成吉卜力風格</code> → edits it
 • <code>grok, 提醒我們週五晚上8點開會</code> → reminder
@@ -44,7 +46,7 @@ In groups, info commands like /stats, /lm and /reminders can be sent privately f
 
 const OWNER_GROUP = `<b>👑 Owner commands in a group</b>
 • <code>/enable</code> · <code>/disable</code> → bot on/off here (new groups start strict)
-• <code>/privacy strict</code> · <code>focused</code> · <code>normal</code> → strict stores nothing; focused sends the group chat to Grok only for questions about it (<code>grok tldr</code>, or when Grok decides it needs it) and keeps 1 day; normal sends recent chat with every question and keeps 7 days
+• <code>/privacy strict</code> · <code>focused</code> · <code>normal</code> → strict stores nothing; focused sends the group chat to Grok only for questions about it (<code>grok tldr</code>, or when Grok decides it needs it) and keeps 1 day; normal sends recent chat and the group's last 20 questions to me with every question; the log keeps 7 days
 • <code>/links auto</code> · <code>mention</code> · <code>off</code> → link cards always / when asked / never
 • <code>/platforms off douyin weibo</code> → cards off per platform (<code>/platforms</code> lists; <code>upload</code> = uploaded videos)
 • <code>/lang zh-tw</code> → zh-tw · zh-cn · en · ja · ko · off

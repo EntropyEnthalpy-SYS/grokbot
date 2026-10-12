@@ -11,6 +11,7 @@ import { createBot, QUESTIONS_PER_USER_PER_HOUR } from "../src/telegram/bot.ts";
 import { GroupStore } from "../src/telegram/groups.ts";
 import { ReminderStore } from "../src/reminders.ts";
 import { WatchStore } from "../src/watches.ts";
+import { FileDesk } from "../src/agent/files.ts";
 import { SkillStore } from "../src/skills.ts";
 import { ImageStudio } from "../src/agent/images.ts";
 import { MemoryStore } from "../src/memory.ts";
@@ -49,7 +50,7 @@ function harness(
     agent?: (
       images: ImageStudio,
       key: string,
-      extra: { memory: MemoryStore; speakers: Map<string, { userId?: number; userName: string }>; polls: PollDesk; confirm: Confirmer },
+      extra: { memory: MemoryStore; speakers: Map<string, { userId?: number; userName: string }>; polls: PollDesk; confirm: Confirmer; files: FileDesk },
     ) => Promise<string | { text: string; stopReason?: string; usedTool?: boolean }>;
   } = {},
 ) {
@@ -64,6 +65,7 @@ function harness(
   const limits = new LimitStore(db);
   const permissions = new PermissionStore(db);
   const polls = new PollDesk();
+  const files = new FileDesk();
   const actions = new ActionDesk();
   const speakers = new Map<string, { userId?: number; userName: string }>();
   const created: { prompt: string; sources: number }[] = [];
@@ -72,17 +74,17 @@ function harness(
     return Buffer.from(`jpeg:${prompt}`);
   });
   const cards = new Map<string, { card: unknown }>();
-  const runs: { key: string; ephemeral?: boolean; text: string; images: number }[] = [];
+  const runs: { key: string; ephemeral?: boolean; history?: { turns: number; maxAgeMs: number }; text: string; images: number }[] = [];
   const sessions = {
     forgetChat: () => 0,
     reset: () => undefined,
     abort: () => false,
     abortChat: () => 0,
-    run: async (key: string, input: { text: string; images?: unknown[] }, handlers: { onStart?: () => void }, turn: { ephemeral?: boolean } = {}) => {
-      runs.push({ key, ephemeral: turn.ephemeral, text: input.text, images: input.images?.length ?? 0 });
+    run: async (key: string, input: { text: string; images?: unknown[] }, handlers: { onStart?: () => void }, turn: { ephemeral?: boolean; history?: { turns: number; maxAgeMs: number } } = {}) => {
+      runs.push({ key, ephemeral: turn.ephemeral, history: turn.history, text: input.text, images: input.images?.length ?? 0 });
       handlers.onStart?.();
       const confirm = confirmerFor({ actions, confirmActions: (chatId) => groups.confirmActions(chatId), speakers }, key);
-      const out = options.agent ? await options.agent(images, key, { memory, speakers, polls, confirm }) : "ok";
+      const out = options.agent ? await options.agent(images, key, { memory, speakers, polls, confirm, files }) : "ok";
       const { text, stopReason = "stop", usedTool = false } = typeof out === "string" ? { text: out } : out;
       if (usedTool) (handlers as { onTool?: (name: string) => void }).onTool?.("create_poll");
       return { role: "assistant", content: text ? [{ type: "text", text }] : [], stopReason };
@@ -109,6 +111,7 @@ function harness(
     watches,
     skills,
     images,
+    files,
     memory,
     speakers,
     usage,
@@ -260,6 +263,22 @@ test("focused groups: a question goes without the group chat and keeps a short h
   await h.waitFor(() => h.runs.length === 2);
   assert.match(h.runs[1]!.text, /阳明山/, "asked about the chat: it's there");
   assert.equal(h.runs[1]!.ephemeral, true, "and that turn isn't kept");
+});
+
+test("the group's shared conversation keeps the day's last questions; /forget clears chat data but keeps saved requests", async () => {
+  const h = harness({ loggedIn: true });
+  h.groups.enable(GROUP, "Grok bot test");
+  h.groups.setPrivacy(GROUP, "normal");
+  h.skills.set(GROUP, "ts", "translate", { id: OWNER, name: "O" });
+  h.memory.add(GROUP, "小明吃素", { userId: OWNER, userName: "O" });
+  await h.bot.handleUpdate(h.groupText(5, "grok 今天天气"));
+  await h.waitFor(() => h.runs.length === 1);
+  assert.deepEqual(h.runs[0]!.history, { turns: 20, maxAgeMs: 24 * 3600_000 });
+  await h.bot.handleUpdate(h.groupText(OWNER, "/forget"));
+  await h.settle();
+  const reply = String(h.calls.filter((c) => c.method === "sendMessage").at(-1)!.payload.text);
+  assert.match(reply, /0 reminder\(s\), 0 watch\(es\) and 1 note\(s\) for this group\. Saved requests \(\/skill\) are kept\./);
+  assert.equal(h.skills.get(GROUP, "ts")?.prompt, "translate");
 });
 
 test("/tr translates the replied message into the group language and replies to that message", async () => {
@@ -872,6 +891,37 @@ test("a document sent privately is read and summarized; /tr on a document transl
 
   await h.bot.handleUpdate(privateUpdate(h, OWNER, "", { text: undefined, document: { file_id: "x", file_unique_id: "x", file_name: "setup.exe" } }));
   assert.match(String(h.calls.at(-1)!.payload.text), /I can read PDF, Word/);
+});
+
+test("“grok 修正语法” replying to a Word file sends back the edited file with what changed; not as a chat answer", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "edit-"));
+  writeFileSync(join(dir, "plan.docx"), docx(["Budget 2027", "Hiring freze until March"]));
+  const h = harness({ loggedIn: true, files: { d1: join(dir, "plan.docx") }, ask: () => '{"edits":[{"p":1,"text":"Hiring freeze until March"}],"summary":["修正拼写：freze → freeze"]}' });
+  h.groups.enable(GROUP, "Grok bot test");
+  const file = { message_id: 40, date: 0, chat: { id: GROUP, type: "supergroup" }, from: { id: 6, is_bot: false, first_name: "Bob" }, document: { file_id: "d1", file_unique_id: "d1", file_name: "plan.docx" } };
+  await h.bot.handleUpdate(h.groupText(5, "grok 修正语法，发回文件", { reply_to_message: file }));
+  await h.until((c) => c.method === "sendDocument");
+  const sent = h.calls.find((c) => c.method === "sendDocument")!.payload as { caption: string; document: { filename?: string } };
+  assert.match(sent.caption, /plan-edited\.docx<\/b> · 1 paragraph changed\n• 修正拼写：freze → freeze/);
+  assert.match(h.asked[0]!.prompt, /\[0\] Budget 2027\n\[1\] Hiring freze until March/);
+  assert.equal(h.runs.length, 0, "a one-off request, not the group's conversation");
+});
+
+test("send_file: a file the AI makes is posted right after its answer, as a reply to the question", async () => {
+  const h = harness({
+    loggedIn: true,
+    agent: async (_images, key, { files }) => {
+      await files.tool(key).execute("1", { name: "../iplc-ss.md", content: "# IPLC\n\n```bash\napt update\n```\n" });
+      return "Here's the Markdown file.";
+    },
+  });
+  h.groups.enable(GROUP, "Grok bot test");
+  await h.bot.handleUpdate(h.groupText(5, "grok markdown 文件"));
+  await h.until((c) => c.method === "sendDocument");
+  const doc = h.calls.find((c) => c.method === "sendDocument")!;
+  assert.equal((doc.payload.document as { filename?: string }).filename, "iplc-ss.md", "no folder in the name");
+  assert.ok(h.calls.findIndex((c) => c.method === "sendDocument") > h.calls.findIndex((c) => c.method === "sendMessage" && String(c.payload.text).includes("Markdown file")), "after the answer");
+  assert.ok((doc.payload.reply_parameters as { message_id: number }).message_id > 0);
 });
 
 test("with ✋ confirmations on, the AI's note waits for the asker's ✅: others can't confirm, a second tap does nothing", async () => {

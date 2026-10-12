@@ -26,7 +26,7 @@ process.on("unhandledRejection", (reason) => console.error("unhandled rejection:
 const config = loadConfig();
 setTimeZone(config.timeZone);
 setDefaultLanguage(config.defaultLanguage);
-const { db, grok, sessions, groups, reader, video, parsehub, images, memory, speakers, polls, actions, limits } = createApp(config);
+const { db, grok, sessions, groups, reader, video, parsehub, images, files, memory, speakers, polls, actions, limits } = createApp(config);
 const cache = new CardCache(db);
 // Each chat's /tz decides what "every day 08:00" means for its reminders.
 const reminders = new ReminderStore(db, (chatId) => groups.timeZone(chatId));
@@ -111,6 +111,7 @@ const bot = createBot({
   watches,
   skills,
   images,
+  files,
   memory,
   speakers,
   usage,

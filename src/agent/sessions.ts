@@ -382,7 +382,7 @@ export const NO_IMAGE_SENT =
   "(automatic note) Your reply says you sent a picture, but no picture was posted: pictures only appear when you call create_image. Either call create_image now (only for a drawing or illustration, never a fake photo of a real person), or say plainly that you can't post that picture, and give a search link instead if it helps.";
 
 /** Things the bot can only do through a tool; saying it did them without the tool is a false claim. */
-const CLAIMS: { action: string; tool?: string; says: (sentence: string) => boolean; note: string }[] = [
+const CLAIMS: { action: string; tool?: string; says: (sentence: string) => boolean; note: string; refusal?: boolean }[] = [
   { action: "image", tool: "create_image", says: (s) => claimsImageSent(s), note: NO_IMAGE_SENT },
   {
     action: "note",
@@ -395,6 +395,20 @@ const CLAIMS: { action: string; tool?: string; says: (sentence: string) => boole
     tool: "create_poll",
     says: (s) => /(投票(已|來了|来了|開好|开好|發起|发起|建好)|(已|幫你|帮你)?(發起|发起|開了|开了|建了)(一個|一个)?投票)|\b(poll (is up|posted|created)|i'?ve (posted|created|started) (a|the) poll)\b/i.test(s),
     note: "(automatic note) Your reply says a poll was posted, but none was: polls appear only when you call create_poll. Call it now if someone asked for a poll, or say you didn't post one.",
+  },
+  {
+    action: "file",
+    tool: "send_file",
+    says: (s) =>
+      /(文件|檔案|档案|附件)(已经|已經|已)?(發|发|傳|传|附上|送)(出|好|了|上|到)?|(文件|檔案|档案|附件)(在上面|在下面|在這|在这|見上|见上|如下)|(見|见)附件|(已经|已經|已)(發|发|傳|传|附上)(給你|给你)?(了)?(一個|一个)?[\w.-]*\s*(文件|檔案|档案)|\b(here(?:'s| is) (?:the|your) file|i'?ve (?:sent|attached) (?:the|a|your) file|file (?:is )?(?:attached|sent|above|below))\b/i.test(s),
+    note: "(automatic note) Your reply says you sent a file, but none was sent: files are sent only when you call send_file. Call send_file now with the complete content and a fitting file name, and keep your reply to one line.",
+  },
+  {
+    action: "file refusal",
+    tool: "send_file",
+    refusal: true,
+    says: (s) => /(發不出|发不出|發不了|发不了|不能發|不能发|沒法發|没法发|無法發送|无法发送|没办法发|沒辦法發)(送)?(任何)?(文件|檔案|档案|附件)|\bcan'?t (?:send|attach) (?:a |the |any )?files?\b/i.test(s),
+    note: "(automatic note) You can send files: call send_file now with the complete content and a fitting file name (e.g. .md for Markdown), and keep your reply to one line.",
   },
   {
     action: "reminder",
@@ -413,7 +427,8 @@ export function falseClaim(text: string, toolsUsed: ReadonlySet<string>): { acti
   const question = (s: string) => /[?？]$|(吗|嗎|呢|么|麼)[。.]?$/.test(s);
   for (const claim of CLAIMS) {
     if (claim.tool && toolsUsed.has(claim.tool)) continue;
-    if (sentences.some((s) => claim.says(s) && !DENIES.test(s) && !question(s))) return { action: claim.action, note: claim.note };
+    // A refusal ("这里发不出文件") is wrong exactly when it denies: those skip the denial filter.
+    if (sentences.some((s) => claim.says(s) && (claim.refusal || !DENIES.test(s)) && !question(s))) return { action: claim.action, note: claim.note };
   }
   return undefined;
 }
