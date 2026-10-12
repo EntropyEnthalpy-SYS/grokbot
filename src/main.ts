@@ -226,7 +226,7 @@ void ops.leftovers().then(async (results) => {
   }
 });
 await bot.start({
-  allowed_updates: ["message", "inline_query", "my_chat_member", "callback_query", "stopped_message_generation"],
+  allowed_updates: ["message", "inline_query", "my_chat_member", "callback_query", "stopped_message_generation", "guest_message"],
   onStart: (me) => console.log(`polling as @${me.username} (reads all group messages: ${me.can_read_all_group_messages})`),
 });
 

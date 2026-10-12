@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { sessionKey } from "../src/telegram/bot.ts";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -152,6 +153,7 @@ function harness(
       const media = (payload as { media: unknown[] }).media;
       return { ok: true, result: media.map((_, i) => ({ message_id: message_id + i, date: 0, chat: { id: GROUP, type: "supergroup" }, photo: [{ file_id: `f${message_id + i}` }] })) } as never;
     }
+    if (method === "answerGuestQuery") return { ok: true, result: { inline_message_id: "inline-1" } } as never;
     return { ok: true, result: ["sendMessage", "sendPhoto", "sendVoice"].includes(method) ? { message_id, date: 0, chat: { id: GROUP, type: "supergroup" }, photo: [{ file_id: `f${message_id}` }] } : true } as never;
   });
   let updateId = 0;
@@ -242,6 +244,41 @@ test("strict groups log nothing: not members' messages, not the bot's own replie
   await h.bot.handleUpdate(h.groupText(5, "grok, what do you think?"));
   await h.settle();
   assert.equal(h.groups.contextSinceLastReply(GROUP, 0, 10_000).length, 0);
+});
+
+test("focused groups: a question goes without the group chat and keeps a short history; “tldr” gets the chat, once", async () => {
+  const h = harness({ loggedIn: true });
+  h.groups.enable(GROUP, "official");
+  await h.bot.handleUpdate(h.groupText(OWNER, "/privacy focused"));
+  assert.equal(h.groups.privacy(GROUP), "focused");
+  await h.bot.handleUpdate(h.groupText(5, "我们周六去阳明山吧"));
+  await h.bot.handleUpdate(h.groupText(6, "grok 三星的自定义插件叫什么？"));
+  await h.waitFor(() => h.runs.length === 1);
+  assert.doesNotMatch(h.runs[0]!.text, /阳明山/, "no background chat");
+  assert.equal(h.runs[0]!.key, sessionKey(GROUP, 0), "the group's conversation, for follow-ups");
+  assert.notEqual(h.runs[0]!.ephemeral, true);
+  await h.bot.handleUpdate(h.groupText(6, "grok tldr"));
+  await h.waitFor(() => h.runs.length === 2);
+  assert.match(h.runs[1]!.text, /阳明山/, "asked about the chat: it's there");
+  assert.equal(h.runs[1]!.ephemeral, true, "and that turn isn't kept");
+});
+
+test("Guest Mode: approved people get one reply (edited with the answer), built from that message and its reply only; others are told it's private", async () => {
+  const h = harness({ loggedIn: true });
+  const guest = (from: number, text: string, extra: Record<string, unknown> = {}): Update =>
+    ({ update_id: h.next(), guest_message: { message_id: 9, date: 0, guest_query_id: `q${from}`, chat: { id: -777, type: "group", title: "elsewhere" }, from: { id: from, is_bot: false, first_name: "G" }, text, ...extra } }) as Update;
+  await h.bot.handleUpdate(guest(5, "@GrokTest_bot hi"));
+  await h.waitFor(() => h.calls.some((c) => c.method === "answerGuestQuery"));
+  const refusal = h.calls.find((c) => c.method === "answerGuestQuery")!.payload as { result: { input_message_content: { message_text: string } } };
+  assert.match(refusal.result.input_message_content.message_text, /private bot/);
+  assert.equal(h.runs.length, 0, "no AI request for a stranger");
+
+  const original = { message_id: 8, date: 0, chat: { id: -777, type: "group" }, from: { id: 6, is_bot: false, first_name: "Bob" }, text: "my key is sk-abcdefghijklmnopqrstuvwx, is this right?" };
+  await h.bot.handleUpdate(guest(OWNER, "@GrokTest_bot 这个说法对吗", { reply_to_message: original }));
+  await h.waitFor(() => h.calls.some((c) => c.method === "editMessageText" && c.payload.inline_message_id === "inline-1" && c.payload.text === "ok"));
+  assert.equal(h.runs.length, 1);
+  assert.equal(h.runs[0]!.ephemeral, true, "never stored");
+  assert.match(h.runs[0]!.text, /replying to Bob: "my key is \[hidden\], is this right\?"\): 这个说法对吗/, "the replied message, with the key hidden");
 });
 
 test("/tr translates the replied message into the group language and replies to that message", async () => {

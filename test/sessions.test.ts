@@ -438,3 +438,20 @@ test("tool steps are reported as they start, including searches Grok runs on its
   await sessions.run("tg:-1", { text: "what's new on X?" }, { onActivity: (name) => steps.push(name) });
   assert.deepEqual(steps, ["x_keyword_search"]);
 });
+
+test("focused history keeps only the last few questions with their answers", async () => {
+  const { lastTurns } = await import("../src/agent/sessions.ts");
+  const m = (role: string, n: number) => ({ role, content: `${role}${n}`, timestamp: n }) as never;
+  const messages = [m("user", 1), m("assistant", 1), m("user", 2), m("assistant", 2), m("toolResult", 2), m("assistant", 2), m("user", 3), m("assistant", 3)];
+  assert.deepEqual(lastTurns(messages, 2).map((x) => (x as unknown as { content: string }).content), ["user2", "assistant2", "toolResult2", "assistant2", "user3", "assistant3"]);
+  assert.equal(lastTurns(messages, 5).length, messages.length);
+});
+
+test("a group chat read for one answer is not kept for later questions", async () => {
+  const { forgetTransient } = await import("../src/agent/sessions.ts");
+  const read = { role: "toolResult", toolCallId: "1", toolName: "read_group_chat", content: [{ type: "text", text: "Amy: secret plans" }], isError: false } as never;
+  const link = { role: "toolResult", toolCallId: "2", toolName: "read_link", content: [{ type: "text", text: "page" }], isError: false } as never;
+  const [a, b] = forgetTransient([read, link]) as unknown as { content: { text: string }[] }[];
+  assert.doesNotMatch(a!.content[0]!.text, /secret/);
+  assert.equal(b!.content[0]!.text, "page");
+});

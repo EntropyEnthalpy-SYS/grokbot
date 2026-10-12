@@ -3,12 +3,21 @@ import { getSetting, setSetting } from "../db.ts";
 import { defaultLanguage } from "../lang.ts";
 import { timeZone } from "../time.ts";
 import { extractLinks, type Entity } from "../links/detect.ts";
+import { redactSecrets } from "../redact.ts";
 
 export type LinkMode = "auto" | "mention" | "off";
 export const LINK_MODES: readonly LinkMode[] = ["auto", "mention", "off"];
 export type VoiceMode = "auto" | "off";
 export type GroupAccess = "everyone" | "approved";
-export type PrivacyMode = "strict" | "normal";
+/**
+ * strict: nothing stored, nothing but the question sent. focused: the group chat goes to Grok only when a
+ * question asks about it ("tldr", "刚才说了什么"); a 1-day log for that. normal: recent chat with every question.
+ */
+export type PrivacyMode = "strict" | "focused" | "normal";
+export const PRIVACY_MODES: readonly PrivacyMode[] = ["strict", "focused", "normal"];
+/** How long focused groups keep their log (enough for "tldr"). */
+export const FOCUSED_LOG_MS = 24 * 60 * 60 * 1000;
+
 export type XStyle = "text" | "picture";
 export { defaultLanguage, LANGUAGES, languageName } from "../lang.ts";
 
@@ -95,7 +104,7 @@ export class GroupStore {
    */
   privacy(chatId: number): PrivacyMode {
     const row = this.#db.prepare("SELECT privacy FROM groups WHERE chat_id = ?").get(chatId) as { privacy: string } | undefined;
-    return row?.privacy === "normal" ? "normal" : "strict";
+    return (PRIVACY_MODES as readonly string[]).includes(row?.privacy ?? "") ? (row!.privacy as PrivacyMode) : "strict";
   }
 
   setPrivacy(chatId: number, mode: PrivacyMode): void {
@@ -292,10 +301,11 @@ export class GroupStore {
    * Messages in this thread since the bot last spoke (at most CONTEXT_LIMIT,
    * CONTEXT_CHARS, and one day), oldest first, excluding `excludeMessageId`.
    */
-  contextSinceLastReply(chatId: number, threadId: number, excludeMessageId: number, now = Date.now()): LogEntry[] {
-    const lastBot = this.#db
-      .prepare("SELECT MAX(at) AS at FROM group_log WHERE chat_id = ? AND thread_id = ? AND is_bot = 1")
-      .get(chatId, threadId) as { at: number | null };
+  contextSinceLastReply(chatId: number, threadId: number, excludeMessageId: number, now = Date.now(), wholeDay = false): LogEntry[] {
+    // `wholeDay`: a question about the chat ("tldr") wants the last messages even if the bot posted cards in between.
+    const lastBot = wholeDay
+      ? { at: null }
+      : (this.#db.prepare("SELECT MAX(at) AS at FROM group_log WHERE chat_id = ? AND thread_id = ? AND is_bot = 1").get(chatId, threadId) as { at: number | null });
     const since = Math.max(lastBot.at ?? 0, now - CONTEXT_MAX_AGE_MS);
     const rows = this.#db
       .prepare(
@@ -330,6 +340,9 @@ export class GroupStore {
 
   prune(now = Date.now()): void {
     this.#db.prepare("DELETE FROM group_log WHERE at < ?").run(now - LOG_RETENTION_MS);
+    this.#db
+      .prepare("DELETE FROM group_log WHERE at < ? AND chat_id IN (SELECT chat_id FROM groups WHERE privacy = 'focused')")
+      .run(now - FOCUSED_LOG_MS);
     this.#db.prepare("DELETE FROM bot_answers WHERE at < ?").run(now - LOG_RETENTION_MS);
   }
 }
@@ -367,6 +380,14 @@ export function describeMessage(message: TgMessage): string {
 
 export function linksIn(message: TgMessage): string[] {
   return extractLinks(message.text ?? message.caption, message.entities ?? message.caption_entities);
+}
+
+/**
+ * A question about the group chat itself ("tldr", "catch me up", "刚才说了什么"): in focused groups only
+ * these get the recent messages. The tldr skill's request ("Summarize the recent group messages…") counts too.
+ */
+export function asksAboutChat(text: string): boolean {
+  return /\btl;?dr\b|group messages|recent messages|catch me up|what (?:did|have|were) (?:they|we|people|you guys|everyone) (?:say|said|talk|discuss)|summar(?:y|ize|ise) (?:of )?(?:the )?(?:chat|conversation|discussion)|刚才|剛才|上面(?:说|說|聊)|前面(?:说|說|聊)|聊了(?:什么|什麼|啥)|聊啥|在聊|他们(?:说|說)|他們(?:說|说)|大家(?:说|說)|总结一下|總結一下|群里|群裡|聊天记录|聊天記錄/i.test(text);
 }
 
 /** Short reactions people reply with: laughter, thanks, agreement. */
@@ -481,12 +502,13 @@ export function buildGroupPrompt(options: {
   const lines: string[] = [];
   if (options.context.length > 0) {
     lines.push(`[Recent messages in ${options.title ? `"${options.title}"` : "the group"} since you last spoke]`);
-    for (const entry of options.context) lines.push(`${entry.name} [uid:${entry.userId ?? "?"}]: ${entry.text}`);
+    // Background others wrote: secrets and personal details are hidden before it leaves the server.
+    for (const entry of options.context) lines.push(`${entry.name} [uid:${entry.userId ?? "?"}]: ${redactSecrets(entry.text)}`);
     lines.push("");
   }
   lines.push("[Message addressed to you]");
   const replying = options.replyTo
-    ? ` (replying to ${options.replyTo.isBot ? "you" : options.replyTo.name}: "${truncate(options.replyTo.text, 500)}")`
+    ? ` (replying to ${options.replyTo.isBot ? "you" : options.replyTo.name}: "${truncate(redactSecrets(options.replyTo.text), 500)}")`
     : "";
   lines.push(`${options.speaker} [uid:${options.speakerId ?? "?"}]${replying}: ${options.text || "(no text)"}`);
   return lines.join("\n");

@@ -201,6 +201,7 @@ export function activityLine(tool: string): string {
   if (/^x_|twitter/i.test(tool)) return "🔍 Searching X…";
   if (/search|browse/i.test(tool)) return "🔍 Searching the web…";
   if (tool === "read_link") return "📖 Reading the link…";
+  if (tool === "read_group_chat") return "💬 Reading the chat…";
   if (tool === "watch_video") return "🎬 Watching the video…";
   if (tool === "create_image") return "🎨 Drawing…";
   if (tool === "create_poll") return "📊 Making the poll…";

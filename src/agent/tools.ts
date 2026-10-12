@@ -7,6 +7,8 @@ import { fetchXPost } from "../links/xpost.ts";
 import { readFile } from "node:fs/promises";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { formatVideo, VideoReader } from "../media/video.ts";
+import { redactSecrets } from "../redact.ts";
+import type { GroupStore } from "../telegram/groups.ts";
 
 const UrlParams = Type.Object({
   url: Type.String({ description: "The http(s) URL" }),
@@ -124,4 +126,28 @@ async function watchWithParseHub(parsehub: ParseHubClient, video: VideoReader, u
   } finally {
     await parsehub.cleanup(download);
   }
+}
+
+/**
+ * Focused privacy: the group chat is not sent with questions, but Grok may read it when a question
+ * needs it ("is what he said true?"). Recent messages of the day, secrets hidden; the result is not
+ * kept for later questions (TRANSIENT_TOOLS).
+ */
+export function groupChatTool(groups: GroupStore, chatId: number, threadId: number, title: () => string | undefined): AgentTool<ReturnType<typeof Type.Object>, undefined> {
+  return {
+    name: "read_group_chat",
+    label: "Reading the chat",
+    description:
+      "Read the last messages of this group chat (up to 30, last 24 hours). Use it only when the question refers to " +
+      "what people said here (\"what did he mean\", \"is that true\", \"summarize\", \"刚才说的\") and the replied message " +
+      "isn't enough. Don't use it for general questions.",
+    parameters: Type.Object({}),
+    execute: async () => {
+      const entries = groups.contextSinceLastReply(chatId, threadId, 0, Date.now(), true);
+      const lines = entries.map((e) => `${e.name} [uid:${e.userId ?? "?"}]: ${redactSecrets(e.text)}`);
+      const name = title();
+      const text = lines.length ? untrusted(`chat${name ? `: ${name}` : ""}`, lines.join("\n")) : "(no recent messages here)";
+      return { content: [{ type: "text", text }], details: undefined };
+    },
+  };
 }

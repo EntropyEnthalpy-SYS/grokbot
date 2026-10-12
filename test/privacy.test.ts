@@ -50,3 +50,31 @@ test("forgetChat removes a group's conversations including forum topics, and not
   assert.equal(sessions.forgetChat(-100), 2);
   assert.deepEqual(keys(), ["tg:-1001", "tg:5"]);
 });
+
+test("focused groups keep their log one day; questions about the chat are told apart from others", async () => {
+  const { asksAboutChat } = await import("../src/telegram/groups.ts");
+  const groups = new GroupStore(openDbAt(":memory:"));
+  const now = Date.now();
+  for (const [chat, mode] of [[-1, "focused"], [-2, "normal"]] as const) {
+    groups.enable(chat, "g");
+    groups.setPrivacy(chat, mode);
+    groups.log(chat, 0, { messageId: 1, name: "A", text: "old", isBot: false, at: now - 30 * 3600_000 });
+    groups.log(chat, 0, { messageId: 2, name: "A", text: "new", isBot: false, at: now - 3600_000 });
+  }
+  groups.prune(now);
+  assert.deepEqual(groups.contextSinceLastReply(-1, 0, 0, now).map((e) => e.text), ["new"]);
+  assert.equal(groups.privacy(-1), "focused");
+  for (const t of ["tldr", "Summarize the recent group messages shown above", "刚才他们说了什么", "大家在聊啥", "catch me up", "總結一下群裡"]) assert.equal(asksAboutChat(t), true, t);
+  for (const t of ["三星的官方自定义插件的app是什么", "is this true?", "翻译这段话", "what's the weather"]) assert.equal(asksAboutChat(t), false, t);
+});
+
+test("the chat Grok may read in focused groups has secrets hidden", async () => {
+  const { groupChatTool } = await import("../src/agent/tools.ts");
+  const groups = new GroupStore(openDbAt(":memory:"));
+  groups.log(-1, 0, { messageId: 1, name: "Amy", text: "server 1.2.3.4 22 root s3cretPass9", isBot: false, at: Date.now() - 60_000 });
+  groups.log(-1, 0, { messageId: 2, name: "Bot", text: "a card", isBot: true, at: Date.now() - 30_000 });
+  const result = await groupChatTool(groups, -1, 0, () => "Friends").execute("1", {} as never);
+  const text = (result.content[0] as { text: string }).text;
+  assert.match(text, /Amy \[uid:\?\]: server 1\.2\.3\.4 22 root \[hidden\]/, "older than the bot's last post, still read");
+  assert.doesNotMatch(text, /s3cretPass9/);
+});

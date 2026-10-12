@@ -1,5 +1,5 @@
 import { ChatSessions } from "./agent/sessions.ts";
-import { readLinkTool, watchVideoTool } from "./agent/tools.ts";
+import { groupChatTool, readLinkTool, watchVideoTool } from "./agent/tools.ts";
 import { ImageStudio } from "./agent/images.ts";
 import { MemoryStore } from "./memory.ts";
 import { PollDesk } from "./agent/polls.ts";
@@ -104,6 +104,8 @@ export function createApp(options: {
       memory.tool(chatIdOf(key), () => speakers.get(key), confirmFor(key)),
       polls.tool(key, confirmFor(key)),
       ...(search.available ? [searchWebTool(search)] : []),
+      // Focused groups: the chat only when Grok decides a question needs it.
+      ...(groups.privacy(chatIdOf(key)) === "focused" ? [groupChatTool(groups, chatIdOf(key), threadOf(key), () => groups.list().find((g) => g.chatId === chatIdOf(key))?.title)] : []),
     ],
     systemExtra: (key) =>
       `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + scriptBlock(groups, chatIdOf(key)) + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key)),
@@ -124,6 +126,11 @@ function scriptBlock(groups: GroupStore, chatId: number): string {
 function personaBlock(groups: GroupStore, chatId: number): string {
   const persona = chatId < 0 ? groups.persona(chatId) : "";
   return persona ? `\n\nStyle the group owner set for you here (follow it unless it conflicts with the rules above):\n${persona}` : "";
+}
+
+/** "tg:-123:topic:5" (or with ":q77" after it) → 5; 0 outside forum topics. */
+function threadOf(chatKey: string): number {
+  return Number(chatKey.match(/:topic:(\d+)/)?.[1] ?? 0);
 }
 
 /** "tg:-123:topic:5" or "tg:-123:q77" → -123. */

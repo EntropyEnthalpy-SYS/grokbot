@@ -18,6 +18,8 @@ export interface TurnInput {
 export interface TurnOptions {
   /** Strict privacy: start with no history, never read or write the database, forget the turn afterwards. */
   ephemeral?: boolean;
+  /** Focused privacy: keep only the last few questions and answers, and none older than this. */
+  history?: { turns: number; maxAgeMs: number };
 }
 
 /** A queued turn whose conversation was cleared (/new, /forget, /disable) before it started. */
@@ -75,7 +77,7 @@ export class ChatSessions {
   run(chatKey: string, input: TurnInput, handlers: TurnHandlers = {}, options: TurnOptions = {}): Promise<AssistantMessage> {
     const generation = this.#generation(chatKey);
     const previous = this.#queues.get(chatKey) ?? Promise.resolve();
-    const turn = previous.catch(() => undefined).then(() => this.#runTurn(chatKey, input, handlers, generation, options.ephemeral ?? false));
+    const turn = previous.catch(() => undefined).then(() => this.#runTurn(chatKey, input, handlers, generation, options));
     this.#queues.set(chatKey, turn);
     const done = () => {
       if (this.#queues.get(chatKey) !== turn) return;
@@ -161,7 +163,8 @@ export class ChatSessions {
     return this.#generations.get(chatKey) ?? 0;
   }
 
-  async #runTurn(chatKey: string, input: TurnInput, handlers: TurnHandlers, generation: number, ephemeral: boolean): Promise<AssistantMessage> {
+  async #runTurn(chatKey: string, input: TurnInput, handlers: TurnHandlers, generation: number, options: TurnOptions): Promise<AssistantMessage> {
+    const ephemeral = options.ephemeral ?? false;
     if (generation !== this.#generation(chatKey)) throw new TurnCancelledError();
     handlers.onStart?.();
     // Ephemeral agents are registered too, so /stop and reset() can abort them.
@@ -169,6 +172,10 @@ export class ChatSessions {
     // Pick up /model and /route changes made since the agent was created.
     agent.state.model = this.#grok.model();
     agent.state.messages = dropOldImages(dropExpired(agent.state.messages, Date.now() - this.#retentionMs));
+    if (options.history) {
+      const { turns, maxAgeMs } = options.history;
+      agent.state.messages = lastTurns(dropExpired(agent.state.messages, Date.now() - maxAgeMs), turns);
+    }
 
     let text = "";
     const toolsUsed = new Set<string>();
@@ -213,6 +220,7 @@ export class ChatSessions {
       if (ephemeral) {
         if (this.#agents.get(chatKey) === agent) this.#agents.delete(chatKey);
       } else if (current) {
+        agent.state.messages = forgetTransient(agent.state.messages);
         this.#save(chatKey, agent.state.messages);
       }
     }
@@ -281,6 +289,27 @@ export function trimContext(messages: readonly AgentMessage[], limit: number): A
   let start = rest.length - limit;
   while (start < rest.length && rest[start]?.role !== "user") start++;
   return [...system, ...rest.slice(start)];
+}
+
+/** Tools whose results serve one answer only (the group chat): later questions see a placeholder instead. */
+export const TRANSIENT_TOOLS = new Set(["read_group_chat"]);
+
+export function forgetTransient(messages: readonly AgentMessage[]): AgentMessage[] {
+  return messages.map((m) =>
+    m.role === "toolResult" && TRANSIENT_TOOLS.has((m as { toolName?: string }).toolName ?? "")
+      ? ({ ...m, content: [{ type: "text", text: "(group chat was read for that answer; not kept)" }] } as AgentMessage)
+      : m,
+  );
+}
+
+/** Only the last `turns` questions with their answers (and tool calls), plus leading system messages. */
+export function lastTurns(messages: readonly AgentMessage[], turns: number): AgentMessage[] {
+  let head = 0;
+  while (head < messages.length && messages[head]?.role === "system") head++;
+  const starts = messages.map((m, i) => (i >= head && m.role === "user" ? i : -1)).filter((i) => i >= 0);
+  if (starts.length <= turns) return [...messages];
+  const from = turns > 0 ? starts[starts.length - turns]! : messages.length;
+  return [...messages.slice(0, head), ...messages.slice(from)];
 }
 
 /**

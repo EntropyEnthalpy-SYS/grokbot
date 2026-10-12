@@ -38,8 +38,9 @@ import { fetchXPost, type XPost } from "../links/xpost.ts";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { escapeHtml } from "./format.ts";
+import { escapeHtml, markdownToTelegramHtml, splitMarkdown } from "./format.ts";
 import {
+  asksAboutChat,
   buildGroupPrompt,
   describeMessage,
   displayName,
@@ -50,6 +51,8 @@ import {
   isOnlyLinks,
   linksIn,
   PLATFORMS,
+  PRIVACY_MODES,
+  type PrivacyMode,
   startsWithBotName,
   stripAddress,
   threadIdOf,
@@ -96,7 +99,7 @@ export const COMMANDS = [
   { command: "xstyle", description: "X posts as text or as a picture of the post" },
   { command: "voice", description: "Group voice transcripts: auto | off" },
   { command: "platforms", description: "Turn link content on/off per platform" },
-  { command: "privacy", description: "Group privacy: strict | normal" },
+  { command: "privacy", description: "Group privacy: strict | focused | normal" },
   { command: "forget", description: "Delete what the bot stored for this chat (owner)" },
   { command: "tidy", description: "Auto-delete my setting replies after 2 min: on | off" },
   { command: "deletelink", description: "Delete link-only messages after the card: on | off" },
@@ -108,6 +111,9 @@ export const COMMANDS = [
 ];
 
 const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
+/** Focused privacy: questions and answers kept for follow-ups. */
+const FOCUSED_TURNS = 6;
 /** /tidy: how long setting replies stay. */
 const TIDY_DELAY_MS = 2 * 60 * 1000;
 /** AI-written scheduled posts per chat (each run uses the AI). */
@@ -193,6 +199,8 @@ type ChatTarget = {
   logGroup?: { chatId: number; threadId: number };
   /** The question came by voice: answer with a voice note too. */
   speak?: boolean;
+  /** Focused privacy: only the last few questions and answers are kept and re-sent. */
+  history?: { turns: number; maxAgeMs: number };
   /** Strict privacy: the conversation is never stored. */
   ephemeral?: boolean;
 };
@@ -325,6 +333,8 @@ export function createBot({
     }
     const userId = ctx.from?.id;
     if (!isOwner(ctx) && permissions.has(userId, "blocked")) return;
+    // Guest Mode: summoned in a chat the bot isn't in; its handler decides who may use it.
+    if (ctx.update.guest_message) return next();
     if (ctx.chat?.type === "private") {
       if (isOwner(ctx) || permissions.has(userId, "private")) return next();
       if (ctx.message) await requestAccess(ctx);
@@ -374,7 +384,7 @@ export function createBot({
   // Remember what is said in enabled groups; it becomes context when someone talks to the bot.
   bot.use(async (ctx, next) => {
     const message = ctx.message;
-    if (message && isGroup(ctx) && !message.text?.startsWith("/") && groups.privacy(ctx.chat!.id) === "normal") {
+    if (message && isGroup(ctx) && !message.text?.startsWith("/") && groups.privacy(ctx.chat!.id) !== "strict") {
       const text = describeMessage(message);
       if (text) {
         groups.log(ctx.chat!.id, threadIdOf(message), {
@@ -460,6 +470,7 @@ export function createBot({
       groups.forget(chatId);
       sessions.forgetChat(chatId);
     },
+    onFocused: (chatId) => applyFocused(chatId),
     usage,
     limits,
     permissions,
@@ -539,13 +550,14 @@ export function createBot({
   bot.command("privacy", async (ctx) => {
     if (!isGroup(ctx)) return ctx.reply("Privacy is a group setting.");
     const arg = ctx.match.trim().toLowerCase();
-    if (arg === "strict" || arg === "normal") {
+    if ((PRIVACY_MODES as readonly string[]).includes(arg)) {
       if (!isOwner(ctx)) return ctx.reply("Only the bot owner can change this.");
-      groups.setPrivacy(ctx.chat!.id, arg);
+      groups.setPrivacy(ctx.chat!.id, arg as PrivacyMode);
       if (arg === "strict") {
         groups.forget(ctx.chat!.id);
         sessions.forgetChat(ctx.chat!.id);
       }
+      if (arg === "focused") applyFocused(ctx.chat!.id);
     }
     return ctx.reply(privacyText(groups.privacy(ctx.chat!.id)), { parse_mode: "HTML" });
   });
@@ -1275,12 +1287,19 @@ export function createBot({
     return ctx.reply("I can read text, links, photos, voice messages, videos and documents (PDF, Word, PowerPoint, text).");
   });
 
+  /** Switching to focused: the stored conversation carried group chat with it, so it goes; the log keeps one day. */
+  function applyFocused(chatId: number): void {
+    sessions.forgetChat(chatId);
+    groups.prune();
+  }
+
   function onGroupMessage(ctx: Context, message: Message): void {
     const me = { id: ctx.me.id, username: ctx.me.username };
     if (message.from?.is_bot) return;
     const chatId = ctx.chat!.id;
     const threadId = threadIdOf(message);
-    const normal = groups.privacy(chatId) === "normal";
+    // Focused groups keep normal's automatic features (voice transcripts, round videos); only the AI's background differs.
+    const normal = groups.privacy(chatId) !== "strict";
     if (isAddressedToBot(message, me, (id, sentAt) => groups.isAnswer(chatId, id, sentAt))) {
       // One answer per album, however many of its pictures count as addressed.
       if (!albums.claim(message)) return;
@@ -1361,7 +1380,8 @@ export function createBot({
     if (isReminderRequest(request) && (await createReminder(ctx, message, request)) === undefined) return;
     // "grok, GPT-7 發布的時候告訴我": a watch. Answering it as a question would promise a message that never comes.
     if (!spokenText && isWatchRequest(request)) return createWatch(ctx, message, request);
-    const strict = groups.privacy(chatId) === "strict";
+    const privacy = groups.privacy(chatId);
+    const strict = privacy === "strict";
     const reply = realReply(message);
     const images: ImageContent[] = [];
     const notes: string[] = [];
@@ -1389,9 +1409,12 @@ export function createBot({
     // "grok 早報": a saved request (/skill) stands in for its name.
     const asked = skills.expand(chatId, stripAddress(ownText ?? describeMessage(message), me)).text;
     const text = album.length > 1 ? `${asked}\n(${album.length} pictures sent together, all attached)` : asked;
+    // Focused: the recent group chat only for a question about it ("tldr"), and then that turn isn't kept.
+    const aboutChat = asksAboutChat(asked);
+    const withChat = privacy === "normal" || (privacy === "focused" && aboutChat);
     let prompt = buildGroupPrompt({
       title: "title" in ctx.chat! ? ctx.chat.title : undefined,
-      context: strict ? [] : groups.contextSinceLastReply(chatId, threadId, message.message_id),
+      context: withChat ? groups.contextSinceLastReply(chatId, threadId, message.message_id, Date.now(), aboutChat) : [],
       speaker: displayName(message.from),
       speakerId: message.from?.id,
       text: ownText !== undefined ? `(voice) ${text}` : text,
@@ -1404,10 +1427,13 @@ export function createBot({
         : undefined,
     });
     if (notes.length) prompt += `\n\n${untrusted("attached-media", notes.join("\n\n"))}`;
-    // Strict: a throwaway conversation per question that is never written to disk; nothing earlier is re-sent.
-    const key = strict ? `${sessionKey(chatId, threadId)}:q${message.message_id}` : sessionKey(chatId, threadId);
+    // Strict (and a focused question that carries the group chat): a throwaway conversation per question,
+    // never written to disk. Focused otherwise: the last few questions and answers of the day, for follow-ups.
+    const ephemeral = strict || (privacy === "focused" && withChat);
+    const key = ephemeral ? `${sessionKey(chatId, threadId)}:q${message.message_id}` : sessionKey(chatId, threadId);
+    const history = privacy === "focused" && !ephemeral ? { turns: FOCUSED_TURNS, maxAgeMs: DAY } : undefined;
     const speak = ownText !== undefined && groups.voiceReply(chatId);
-    await chat(ctx, { text: prompt, images }, { key, replyTo: message.message_id, threadId, logGroup: { chatId, threadId }, speak, ephemeral: strict });
+    await chat(ctx, { text: prompt, images }, { key, replyTo: message.message_id, threadId, logGroup: { chatId, threadId }, speak, ephemeral, history });
   }
 
   /** Transcribe a group voice note (with a translation when it's in another language). "grok, …" by voice is a question. */
@@ -1724,7 +1750,7 @@ export function createBot({
           },
           onActivity: (name) => streamer.status(activityLine(name)),
         },
-        { ephemeral: target.ephemeral },
+        { ephemeral: target.ephemeral, history: target.history },
       );
       if (reply.stopReason === "error") {
         // Logged (no message content) so a failed answer leaves a trace in the journal and /health.
@@ -1797,8 +1823,82 @@ export function createBot({
 
   function logBotMessage(ctx: Context, chatId: number, threadId: number, messageId: number | undefined, text: string): void {
     // Strict groups keep no log at all: bot answers often quote the person who asked.
-    if (messageId === undefined || groups.privacy(chatId) !== "normal") return;
+    if (messageId === undefined || groups.privacy(chatId) === "strict") return;
     groups.log(chatId, threadId, { messageId, userId: ctx.me.id, name: ctx.me.first_name, text, isBot: true, at: Date.now() });
+  }
+
+  // Guest Mode: "@bot …" in a chat the bot isn't a member of. Telegram shows it only that message and the one it
+  // replies to, and lets it send one reply, which is edited while it works. Owner, 💬 private and ⭐ trusted only.
+  bot.on("guest_message", (ctx) => {
+    const message = ctx.guestMessage!;
+    if (!message.from || message.from.is_bot || !message.guest_query_id) return;
+    background(ctx, () => answerGuest(ctx, message), { quiet: true });
+  });
+
+  async function answerGuest(ctx: Context, message: Message): Promise<void> {
+    const from = message.from!;
+    const answer = (text: string) =>
+      bot.api.answerGuestQuery(message.guest_query_id!, {
+        type: "article",
+        id: "answer",
+        title: "Grok",
+        input_message_content: { message_text: text, parse_mode: "HTML", link_preview_options: { is_disabled: true } },
+      });
+    const allowed = from.id === ownerId || permissions.has(from.id, "private") || permissions.has(from.id, "trusted");
+    if (!allowed) return void (await answer("🔒 I'm a private bot. Ask my owner for access."));
+    if (!(await grok.isLoggedIn())) return void (await answer("The bot owner needs to log in to Grok first."));
+    if (!mayAsk(ctx, from.id)) return void (await answer("⏳ You've reached your question limit for now. Try again later."));
+    const sent = await answer("⏳ …");
+    const edit = (html: string) =>
+      bot.api.editMessageTextInline(sent.inline_message_id, html, { parse_mode: "HTML", link_preview_options: { is_disabled: true } }).catch(() => undefined);
+    const me = { id: ctx.me.id, username: ctx.me.username };
+    const reply = message.reply_to_message;
+    const images: ImageContent[] = [];
+    const notes: string[] = [];
+    for (const source of [message, reply]) {
+      if (!source) continue;
+      try {
+        const content = await media.content(source as Message);
+        if (content) {
+          images.push(...content.images);
+          if (content.text) notes.push(content.text);
+        }
+      } catch (error) {
+        notes.push(`(Couldn't read the attached media: ${errorMessage(error)})`);
+      }
+    }
+    // "@bot ts …": the caller's own saved requests (from their private chat with the bot).
+    const request = skills.expand(from.id, stripAddress(describeMessage(message), me)).text;
+    let prompt = buildGroupPrompt({
+      context: [],
+      speaker: displayName(from),
+      speakerId: from.id,
+      text: request,
+      replyTo: reply ? { name: displayName(reply.from), text: describeMessage(reply), isBot: reply.from?.id === me.id } : undefined,
+    });
+    if (notes.length) prompt += `\n\n${untrusted("attached-media", notes.join("\n\n"))}`;
+    prompt += "\n\n(You were summoned in a chat you are not part of: answer only this, in one message, text only.)";
+    usage.record(from.id, { id: from.id, name: displayName(from) }, "question");
+    let shown = "";
+    try {
+      const result = await sessions.run(
+        `tg:${from.id}:g${message.message_id}`,
+        { text: prompt, images },
+        {
+          onActivity: (name) => {
+            const line = activityLine(name);
+            if (line !== shown) void edit(escapeHtml((shown = line)));
+          },
+        },
+        { ephemeral: true },
+      );
+      const text = assistantText(result).trim() || "I couldn't come up with an answer this time.";
+      const [first = text, ...rest] = splitMarkdown(text, 3800);
+      await edit(markdownToTelegramHtml(first) + (rest.length ? "\n\n<i>(cut short: ask me privately for the rest)</i>" : ""));
+    } catch (error) {
+      console.warn(`guest answer failed: ${errorMessage(error)}`);
+      await edit(`⚠️ ${escapeHtml(friendlyError(errorMessage(error), grok.route, from.id === ownerId))}`);
+    }
   }
 
   // Inline mode: "@bot <link>" in any chat. Owner only unless INLINE_PUBLIC is set (translations use the Grok quota).
@@ -1836,7 +1936,19 @@ export async function registerCommands(bot: Bot): Promise<void> {
   );
 }
 
-export function privacyText(mode: "strict" | "normal"): string {
+export function privacyText(mode: PrivacyMode): string {
+  if (mode === "focused") {
+    return [
+      "🎯 <b>Privacy: focused</b>",
+      "• When someone asks me, Grok sees that message, the one it replies to, the /lm notes and my last few answers here (up to 6, 1 day) for follow-ups.",
+      "• The group chat goes to Grok only for a question about it (<code>grok tldr</code>, “grok, 刚才说了什么”), or when Grok decides a question needs it; it isn't kept afterwards.",
+      "• Keys, passwords, server logins, emails, phone and card numbers in others' messages are hidden before anything is sent.",
+      "• Group messages are stored on the bot's server for 1 day, for that.",
+      "• Voice notes are transcribed automatically (/voice).",
+      "",
+      "Owner: <code>/privacy strict</code> stores nothing · <code>/privacy normal</code> sends recent chat with every question.",
+    ].join("\n");
+  }
   return mode === "strict"
     ? [
         "🔒 <b>Privacy: strict</b>",
@@ -1846,7 +1958,7 @@ export function privacyText(mode: "strict" | "normal"): string {
         "• Shared links and uploaded videos still get content cards (only that content is processed).",
         "• Image requests send only the description (and the photo to change) to xAI; images are not stored.",
         "",
-        "Owner: <code>/privacy normal</code> enables chat context and memory.",
+        "Owner: <code>/privacy focused</code> (chat only when asked about it) or <code>/privacy normal</code> enables chat context and memory.",
       ].join("\n")
     : [
         "🔓 <b>Privacy: normal</b>",

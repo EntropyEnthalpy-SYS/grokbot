@@ -36,6 +36,7 @@ const EVERYONE = `<b>⌨️ Commands for everyone</b>
 • <code>/remind edit 3 改到9點</code> · <code>/remind pause 3</code> · <code>/remind resume 3</code>; a due reminder has 💤 snooze buttons
 • <code>/tz</code> → this chat's time zone (owner changes it in groups: <code>/tz Europe/London</code>)
 • <code>/lm</code> notes: <code>/lm add 小明吃素</code> · <code>/lm del 2</code>
+• <b>Any chat, without adding me</b> (Guest Mode; owner, 💬 and ⭐ only): <code>@bot 这个说法对吗</code> or <code>@bot ts …</code> as a reply. I see only that message and the one it replies to.
 • <code>/skill</code> → saved requests; run one with <code>grok 早報</code> (add words: <code>grok 早報 只要加密貨幣</code>). Owner and ⭐ trusted save them: <code>/skill add 早報 = 搜今天5條AI新聞，每條一行附連結</code> · <code>/skill del 早報</code>
 • <code>/stats</code> → your usage and what's left of your limits
 • <code>/help</code> → this help
@@ -44,7 +45,7 @@ In groups, info commands like /stats, /lm and /reminders can be sent privately f
 
 const OWNER_GROUP = `<b>👑 Owner commands in a group</b>
 • <code>/enable</code> · <code>/disable</code> → bot on/off here (new groups start strict)
-• <code>/privacy strict</code> · <code>normal</code> → strict stores nothing; normal keeps 7 days of context
+• <code>/privacy strict</code> · <code>focused</code> · <code>normal</code> → strict stores nothing; focused sends the group chat to Grok only for questions about it (<code>grok tldr</code>, or when Grok decides it needs it) and keeps 1 day; normal sends recent chat with every question and keeps 7 days
 • <code>/links auto</code> · <code>mention</code> · <code>off</code> → link cards always / when asked / never
 • <code>/platforms off douyin weibo</code> → cards off per platform (<code>/platforms</code> lists; <code>upload</code> = uploaded videos)
 • <code>/lang zh-tw</code> → zh-tw · zh-cn · en · ja · ko · off

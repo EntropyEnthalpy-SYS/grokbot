@@ -10,7 +10,7 @@ import { formatLocalTime } from "../reminders.ts";
 import { findTimeZone, formatLocalTime as formatInZone, timeZone, zoneLabel } from "../time.ts";
 import { escapeAttr, escapeHtml } from "./format.ts";
 import { GUIDE } from "./guide.ts";
-import { LANGUAGES, LINK_MODES, type GroupStore } from "./groups.ts";
+import { LANGUAGES, LINK_MODES, PRIVACY_MODES, type GroupStore } from "./groups.ts";
 
 const MODELS_PER_PAGE = 8;
 
@@ -33,6 +33,8 @@ export interface AdminDeps {
   health?: HealthMonitor;
   /** Switching a group to strict deletes what was stored under normal mode. */
   onStrict: (chatId: number) => void;
+  /** Switched to focused: forget the stored conversation, keep one day of log. */
+  onFocused?: (chatId: number) => void;
   usage?: UsageStore;
   limits?: LimitStore;
   permissions?: PermissionStore;
@@ -459,7 +461,7 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
     return {
       text: [
         `<b>${escapeHtml(group.title)}</b>`,
-        "Tap a setting to change it. Strict privacy deletes the stored chat log and conversations.",
+        "Tap a setting to change it. Privacy: strict stores nothing · focused sends chat only when asked about it · normal sends recent chat. Strict deletes the stored log and conversations.",
         `🎭 Persona: ${persona ? `<i>${escapeHtml(persona)}</i>` : "default"}`,
       ].join("\n"),
       keyboard,
@@ -472,9 +474,10 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
       case "links":
         return groups.setLinkMode(chatId, cycle(LINK_MODES, groups.linkMode(chatId)));
       case "privacy": {
-        const next = groups.privacy(chatId) === "strict" ? "normal" : "strict";
+        const next = cycle(PRIVACY_MODES, groups.privacy(chatId));
         groups.setPrivacy(chatId, next);
         if (next === "strict") deps.onStrict(chatId);
+        if (next === "focused") deps.onFocused?.(chatId);
         return;
       }
       case "lang":
