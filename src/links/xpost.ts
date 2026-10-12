@@ -89,7 +89,11 @@ async function fromFxTwitter(id: string, fetchImpl: typeof fetch, signal?: Abort
 export function parseFx(tweet: Json): XPost {
   const media = tweet.media ?? {};
   const videos: XVideo[] = (media.videos ?? [])
-    .map((video: Json) => ({ url: video.url ? String(video.url) : undefined, thumbnail: String(video.thumbnail_url ?? "") }))
+    .map((video: Json) => {
+      const mp4s = ((video.formats ?? []) as Json[]).filter((f) => f.container === "mp4").map((f) => ({ url: f.url, bitrate: f.bitrate }));
+      const url = sendableMp4(mp4s, Number(video.duration) || 0) ?? video.url;
+      return { url: url ? String(url) : undefined, thumbnail: String(video.thumbnail_url ?? "") };
+    })
     .filter((video: XVideo) => video.thumbnail || video.url);
   const translation = String(tweet.translation?.text ?? "").trim();
   return {
@@ -127,10 +131,9 @@ export function parseSyndication(tweet: Json): XPost {
   const videos: XVideo[] = details
     .filter((m) => m.type !== "photo")
     .map((m) => {
-      const mp4 = ((m.video_info?.variants ?? []) as Json[])
-        .filter((v) => v.content_type === "video/mp4")
-        .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))[0];
-      return { url: mp4?.url ? String(mp4.url) : undefined, thumbnail: String(m.media_url_https ?? "") };
+      const mp4s = ((m.video_info?.variants ?? []) as Json[]).filter((v) => v.content_type === "video/mp4");
+      const url = sendableMp4(mp4s, (Number(m.video_info?.duration_millis) || 0) / 1000);
+      return { url: url ? String(url) : undefined, thumbnail: String(m.media_url_https ?? "") };
     });
   return {
     url: `https://x.com/${tweet.user?.screen_name ?? "i"}/status/${tweet.id_str}`,
@@ -161,6 +164,21 @@ function sizeOf(media: Json | undefined): XPost["mediaSize"] {
   const width = Number(media?.width);
   const height = Number(media?.height);
   return width > 0 && height > 0 ? { width, height } : undefined;
+}
+
+/** Telegram fetches files by URL only up to 20 MB; a bigger video is dropped from the card ("WEBPAGE_CURL_FAILED"). */
+const URL_FETCH_LIMIT = 20 * 1024 * 1024;
+
+/**
+ * The sharpest mp4 Telegram can still fetch: X's bitrate is a ceiling, so bitrate × duration
+ * over-estimates the size and the choice stays under the limit. Without that information, the sharpest.
+ */
+export function sendableMp4(variants: readonly { url?: unknown; bitrate?: unknown }[], durationSec: number): string | undefined {
+  const sorted = variants.filter((v) => v.url).sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0));
+  if (sorted.length === 0) return undefined;
+  if (!(durationSec > 0)) return String(sorted[0]!.url);
+  const fits = sorted.find((v) => ((Number(v.bitrate) || 0) * durationSec) / 8 <= URL_FETCH_LIMIT);
+  return String((fits ?? sorted.at(-1))!.url);
 }
 
 /** X appends a t.co link to the attached media at the end of the text; it's noise once the media is shown. */

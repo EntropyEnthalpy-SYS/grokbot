@@ -63,6 +63,17 @@ test("an X Article (a post that is only a link) shows the article's title and op
   assert.equal(post.text, "look");
 });
 
+test("a video gets the sharpest version Telegram can fetch (up to 20 MB), not a 4K file it would refuse", () => {
+  const v = (res: string, bitrate: number) => ({ container: "mp4", bitrate, url: `https://video.twimg.com/v/${res}.mp4` });
+  const video = (duration: number) => ({ url: "https://video.twimg.com/v/2160x3840.mp4", thumbnail_url: "t", duration, formats: [{ container: "m3u8", url: "x.m3u8" }, v("320x568", 632_000), v("720x1280", 2_176_000), v("1080x1920", 10_368_000), v("2160x3840", 25_128_000)] });
+  const pick = (duration: number) => parseFx({ text: "", author: { screen_name: "a" }, media: { videos: [video(duration)] } }).videos[0]!.url;
+  assert.equal(pick(20), "https://video.twimg.com/v/720x1280.mp4", "20 s: 1080p might pass 20 MB, 4K (42 MB) surely does");
+  assert.equal(pick(6), "https://video.twimg.com/v/2160x3840.mp4", "a short clip keeps full quality");
+  assert.equal(pick(600), "https://video.twimg.com/v/320x568.mp4", "too long for any: the smallest");
+  const syndicated = parseSyndication({ id_str: "1", user: { screen_name: "a" }, mediaDetails: [{ type: "video", media_url_https: "t", video_info: { duration_millis: 20_000, variants: [{ content_type: "video/mp4", bitrate: 25_128_000, url: "https://v/4k.mp4" }, { content_type: "video/mp4", bitrate: 2_176_000, url: "https://v/720.mp4" }] } }] });
+  assert.equal(syndicated.videos[0]!.url, "https://v/720.mp4");
+});
+
 test("falls back to X's embed CDN when fxtwitter fails", async () => {
   const urls: string[] = [];
   const impl = (async (input: string | URL | Request) => {
