@@ -38,7 +38,7 @@ import { fetchXPost, type XPost } from "../links/xpost.ts";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { escapeHtml, markdownToTelegramHtml, splitMarkdown } from "./format.ts";
+import { escapeHtml } from "./format.ts";
 import {
   asksAboutChat,
   buildGroupPrompt,
@@ -333,8 +333,6 @@ export function createBot({
     }
     const userId = ctx.from?.id;
     if (!isOwner(ctx) && permissions.has(userId, "blocked")) return;
-    // Guest Mode: summoned in a chat the bot isn't in; its handler decides who may use it.
-    if (ctx.update.guest_message) return next();
     if (ctx.chat?.type === "private") {
       if (isOwner(ctx) || permissions.has(userId, "private")) return next();
       if (ctx.message) await requestAccess(ctx);
@@ -1825,80 +1823,6 @@ export function createBot({
     // Strict groups keep no log at all: bot answers often quote the person who asked.
     if (messageId === undefined || groups.privacy(chatId) === "strict") return;
     groups.log(chatId, threadId, { messageId, userId: ctx.me.id, name: ctx.me.first_name, text, isBot: true, at: Date.now() });
-  }
-
-  // Guest Mode: "@bot …" in a chat the bot isn't a member of. Telegram shows it only that message and the one it
-  // replies to, and lets it send one reply, which is edited while it works. Owner, 💬 private and ⭐ trusted only.
-  bot.on("guest_message", (ctx) => {
-    const message = ctx.guestMessage!;
-    if (!message.from || message.from.is_bot || !message.guest_query_id) return;
-    background(ctx, () => answerGuest(ctx, message), { quiet: true });
-  });
-
-  async function answerGuest(ctx: Context, message: Message): Promise<void> {
-    const from = message.from!;
-    const answer = (text: string) =>
-      bot.api.answerGuestQuery(message.guest_query_id!, {
-        type: "article",
-        id: "answer",
-        title: "Grok",
-        input_message_content: { message_text: text, parse_mode: "HTML", link_preview_options: { is_disabled: true } },
-      });
-    const allowed = from.id === ownerId || permissions.has(from.id, "private") || permissions.has(from.id, "trusted");
-    if (!allowed) return void (await answer("🔒 I'm a private bot. Ask my owner for access."));
-    if (!(await grok.isLoggedIn())) return void (await answer("The bot owner needs to log in to Grok first."));
-    if (!mayAsk(ctx, from.id)) return void (await answer("⏳ You've reached your question limit for now. Try again later."));
-    const sent = await answer("⏳ …");
-    const edit = (html: string) =>
-      bot.api.editMessageTextInline(sent.inline_message_id, html, { parse_mode: "HTML", link_preview_options: { is_disabled: true } }).catch(() => undefined);
-    const me = { id: ctx.me.id, username: ctx.me.username };
-    const reply = message.reply_to_message;
-    const images: ImageContent[] = [];
-    const notes: string[] = [];
-    for (const source of [message, reply]) {
-      if (!source) continue;
-      try {
-        const content = await media.content(source as Message);
-        if (content) {
-          images.push(...content.images);
-          if (content.text) notes.push(content.text);
-        }
-      } catch (error) {
-        notes.push(`(Couldn't read the attached media: ${errorMessage(error)})`);
-      }
-    }
-    // "@bot ts …": the caller's own saved requests (from their private chat with the bot).
-    const request = skills.expand(from.id, stripAddress(describeMessage(message), me)).text;
-    let prompt = buildGroupPrompt({
-      context: [],
-      speaker: displayName(from),
-      speakerId: from.id,
-      text: request,
-      replyTo: reply ? { name: displayName(reply.from), text: describeMessage(reply), isBot: reply.from?.id === me.id } : undefined,
-    });
-    if (notes.length) prompt += `\n\n${untrusted("attached-media", notes.join("\n\n"))}`;
-    prompt += "\n\n(You were summoned in a chat you are not part of: answer only this, in one message, text only.)";
-    usage.record(from.id, { id: from.id, name: displayName(from) }, "question");
-    let shown = "";
-    try {
-      const result = await sessions.run(
-        `tg:${from.id}:g${message.message_id}`,
-        { text: prompt, images },
-        {
-          onActivity: (name) => {
-            const line = activityLine(name);
-            if (line !== shown) void edit(escapeHtml((shown = line)));
-          },
-        },
-        { ephemeral: true },
-      );
-      const text = assistantText(result).trim() || "I couldn't come up with an answer this time.";
-      const [first = text, ...rest] = splitMarkdown(text, 3800);
-      await edit(markdownToTelegramHtml(first) + (rest.length ? "\n\n<i>(cut short: ask me privately for the rest)</i>" : ""));
-    } catch (error) {
-      console.warn(`guest answer failed: ${errorMessage(error)}`);
-      await edit(`⚠️ ${escapeHtml(friendlyError(errorMessage(error), grok.route, from.id === ownerId))}`);
-    }
   }
 
   // Inline mode: "@bot <link>" in any chat. Owner only unless INLINE_PUBLIC is set (translations use the Grok quota).

@@ -17,7 +17,6 @@ Plain TypeScript on Node 24 (no build step), [grammY](https://grammy.dev), [pi](
 - **Watches** (`/watch every 6h GPT-7 release`, “grok, GPT-7 發布的時候告訴我”): checked every few hours with web/X search, posted only when something is new; one-time events end the watch, every watch ends after 30 days.
 - **Saved requests** (`/skill add 早報 = …`, then “grok 早報” or `/schedule 每天8點 早報`): a chat's own shortcuts, such as a translator, fact-check or chat summary.
 - **Polls** (“grok, 開個投票…”) and **notes** it always remembers (`/lm`, “grok, 記住…”). In groups, ones the AI suggests wait for the asker's ✅, so a web page can't talk it into posting or saving something.
-- **Guest Mode**: “@bot …” in any chat, even one the bot isn't in; it sees only that message and the one it replies to (owner, private-access and trusted people only).
 - **Privacy modes**: `strict` (default for new groups — nothing stored, each question answered on its own), `focused` (the group chat goes to the AI only for questions about it, like “grok tldr”, or when the AI asks to read it; follow-ups remember the last few answers; 1 day stored) or `normal` (recent chat with every question; 7 days of context and memory). Keys, passwords, logins, emails, phone and card numbers in others' messages are hidden before anything goes to the AI.
 
 **In private chats** (the owner, plus people the owner allows): the same assistant with its own conversation, streamed as a Telegram draft with a Stop button.

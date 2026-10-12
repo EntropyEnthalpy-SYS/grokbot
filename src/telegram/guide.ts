@@ -36,7 +36,6 @@ const EVERYONE = `<b>⌨️ Commands for everyone</b>
 • <code>/remind edit 3 改到9點</code> · <code>/remind pause 3</code> · <code>/remind resume 3</code>; a due reminder has 💤 snooze buttons
 • <code>/tz</code> → this chat's time zone (owner changes it in groups: <code>/tz Europe/London</code>)
 • <code>/lm</code> notes: <code>/lm add 小明吃素</code> · <code>/lm del 2</code>
-• <b>Any chat, without adding me</b> (Guest Mode; owner, 💬 and ⭐ only): <code>@bot 这个说法对吗</code> or <code>@bot ts …</code> as a reply. I see only that message and the one it replies to.
 • <code>/skill</code> → saved requests; run one with <code>grok 早報</code> (add words: <code>grok 早報 只要加密貨幣</code>). Owner and ⭐ trusted save them: <code>/skill add 早報 = 搜今天5條AI新聞，每條一行附連結</code> · <code>/skill del 早報</code>
 • <code>/stats</code> → your usage and what's left of your limits
 • <code>/help</code> → this help
