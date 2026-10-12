@@ -95,7 +95,7 @@ test("long final replies continue in new messages chained as replies", async () 
   assert.equal(calls[1]?.replyTo, 100);
 });
 
-test("a long answer is one rich message: long code collapses, tag-like text survives; short answers stay plain messages", async () => {
+test("a long answer is one rich message: long code collapses, code blocks get 📋, tag-like text survives; short answers stay plain messages", async () => {
   const yaml = Array.from({ length: 40 }, (_, i) => `  rule${i}: <b>${i}</b>`).join("\n");
   const answer = `Use Vec<String> and \`a<b>\`.\n\n${"说明。".repeat(1200)}\n\n\`\`\`yaml\n${yaml}\n\`\`\`\n\n\`\`\`sh\necho short\n\`\`\``;
   const { api, calls } = fakeApi({ rich: "accept" });
@@ -107,7 +107,9 @@ test("a long answer is one rich message: long code collapses, tag-like text surv
   assert.equal(sent.replyTo, 7);
   assert.match(sent.text, /^Use Vec&lt;String> and `a<b>`\./);
   assert.match(sent.text, /<details><summary>📄 yaml · 40 lines<\/summary>\n\n```yaml\n  rule0: <b>0<\/b>\n/);
-  assert.match(sent.text, /```\n\n<\/details>\n\n```sh\necho short\n```$/, "a short block stays open");
+  // Long code: 📋 asks the bot for block 0 (Telegram's copy button holds 256 characters); short code copies in one tap.
+  assert.match(sent.text, /```\n\n<\/details>\n\n<tg-button-row align="left"><tg-button type="callback_data" data="code:0">📋 Copy<\/tg-button><\/tg-button-row>\n\n```sh\n/, "a short block stays open");
+  assert.match(sent.text, /```sh\necho short\n```\n\n<tg-button-row align="left"><tg-button type="copy_text" text="echo short">📋 Copy<\/tg-button><\/tg-button-row>$/);
 
   const short = fakeApi({ rich: "accept" });
   await new ReplyStreamer(short.api, 1).finish("**short**");

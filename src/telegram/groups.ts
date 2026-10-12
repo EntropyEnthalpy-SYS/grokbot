@@ -341,6 +341,20 @@ export function richMessageText(message: TgMessage): string | undefined {
   return rich ? richText(rich).trim() : undefined;
 }
 
+/** The code blocks of a rich message, in order (inside collapsed blocks too). */
+export function richCodeBlocks(message: TgMessage): { code: string; language: string }[] {
+  const found: { code: string; language: string }[] = [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (!node || typeof node !== "object") return;
+    const block = node as Record<string, unknown>;
+    if (block.type === "pre") return void found.push({ code: richText(block.text), language: typeof block.language === "string" ? block.language : "" });
+    for (const value of Object.values(block)) if (Array.isArray(value)) walk(value);
+  };
+  walk((message as { rich_message?: unknown }).rich_message);
+  return found;
+}
+
 function richText(node: unknown): string {
   if (typeof node === "string") return node;
   if (Array.isArray(node)) return node.map(richText).join("");

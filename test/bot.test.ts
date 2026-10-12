@@ -691,6 +691,41 @@ const ownerPress = (h: ReturnType<typeof harness>, data: string): Update => ({
 const sentTo = (h: ReturnType<typeof harness>, chatId: number) =>
   h.calls.filter((c) => c.method === "sendMessage" && c.payload.chat_id === chatId).map((c) => String(c.payload.text));
 
+test("📋 under a long answer's code block posts that block on its own (Telegram's Copy button), or as a file when it's too long", async () => {
+  const h = harness({ loggedIn: true });
+  const long = "x: 1\n".repeat(1200);
+  const press = (data: string) =>
+    ({
+      update_id: h.next(),
+      callback_query: {
+        id: String(h.next()),
+        from: { id: OWNER, is_bot: false, first_name: "Owner" },
+        chat_instance: "c",
+        data,
+        message: {
+          message_id: 40,
+          date: 1,
+          chat: { id: OWNER, type: "private", first_name: "Owner" },
+          rich_message: {
+            blocks: [
+              { type: "pre", text: "echo 1", language: "sh" },
+              { type: "details", summary: "📄 yaml · 2 lines", blocks: [{ type: "pre", text: ["a: <1>\n", "b: 2"], language: "yaml" }] },
+              { type: "pre", text: long, language: "yaml" },
+            ],
+          },
+        },
+      },
+    }) as Update;
+  await h.bot.handleUpdate(press("code:1"));
+  await h.until((c) => c.method === "sendMessage");
+  const sent = h.calls.find((c) => c.method === "sendMessage")!.payload;
+  assert.equal(sent.text, '<pre><code class="language-yaml">a: &lt;1&gt;\nb: 2</code></pre>', "the second block, the one inside the collapsed part");
+  assert.equal((sent.reply_parameters as { message_id: number }).message_id, 40);
+  await h.bot.handleUpdate(press("code:2"));
+  await h.until((c) => c.method === "sendDocument");
+  assert.equal((h.calls.find((c) => c.method === "sendDocument")!.payload as { document: { filename?: string } }).document.filename, "code.yaml");
+});
+
 test("a stranger's private message: told the bot is private, owner asked once a day; Allow opens the private chat", async () => {
   const h = harness();
   await h.bot.handleUpdate(privateUpdate(h, STRANGER, "hi"));

@@ -7,6 +7,10 @@ export const CHUNK_LIMIT = 3500;
 export const RICH_LIMIT = 30_000;
 /** In rich messages, code blocks longer than this many lines are collapsed (tap to expand). */
 const COLLAPSE_LINES = 15;
+/** Telegram's copy button holds at most this many characters; longer code gets a 📋 that posts it (CODE_BUTTON). */
+const COPY_TEXT_LIMIT = 256;
+/** Callback data of 📋 under a longer code block: "code:<n>", the n-th code block of the message. */
+export const CODE_BUTTON = /^code:(\d+)$/;
 
 const FENCE = /^\s*```/;
 
@@ -16,11 +20,13 @@ export function escapeHtml(text: string): string {
 
 /**
  * The Markdown Grok writes, as Telegram rich Markdown: long code blocks collapse behind a
- * "📄 yaml · 40 lines" bar, and text that looks like an HTML tag ("Vec<String>") is kept
- * (Telegram would drop it). Code keeps its text as is.
+ * "📄 yaml · 40 lines" bar, every code block gets a 📋 Copy button (one tap for short code;
+ * longer code is posted on its own, see CODE_BUTTON), and text that looks like an HTML tag
+ * ("Vec<String>") is kept (Telegram would drop it). Code keeps its text as is.
  */
 export function richMarkdown(markdown: string): string {
   const out: string[] = [];
+  let blocks = 0;
   const lines = markdown.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
@@ -35,6 +41,13 @@ export function richMarkdown(markdown: string): string {
     const size = end - i - 1;
     if (size > COLLAPSE_LINES) out.push(`<details><summary>📄 ${open[1] || "code"} · ${size} lines</summary>`, "", ...block, "", "</details>");
     else out.push(...block);
+    const code = lines.slice(i + 1, end).join("\n");
+    const button =
+      code.length <= COPY_TEXT_LIMIT
+        ? `<tg-button type="copy_text" text="${escapeHtml(code).replace(/"/g, "&quot;").replace(/\n/g, "&#10;")}">📋 Copy</tg-button>`
+        : `<tg-button type="callback_data" data="code:${blocks}">📋 Copy</tg-button>`;
+    if (code.trim()) out.push("", `<tg-button-row align="left">${button}</tg-button-row>`);
+    blocks++;
     i = end;
   }
   return out.join("\n");

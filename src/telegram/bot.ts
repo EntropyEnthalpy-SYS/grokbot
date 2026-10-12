@@ -38,7 +38,7 @@ import { fetchXPost, type XPost } from "../links/xpost.ts";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { escapeHtml } from "./format.ts";
+import { CODE_BUTTON, escapeHtml } from "./format.ts";
 import {
   asksAboutChat,
   buildGroupPrompt,
@@ -53,6 +53,7 @@ import {
   PLATFORMS,
   PRIVACY_MODES,
   type PrivacyMode,
+  richCodeBlocks,
   richMessageText,
   startsWithBotName,
   stripAddress,
@@ -131,6 +132,9 @@ export const QUESTIONS_PER_USER_PER_HOUR = LIMITS.questionsPerUserHour.default;
 export const QUESTIONS_PER_GROUP_PER_HOUR = LIMITS.questionsPerGroupHour.default;
 /** Callback data of the 📝 Summary button under video cards. */
 const SUMMARY_BUTTON = "vsum";
+/** 📋 on a code block: up to this many characters it comes as a message (with Telegram's Copy button), else as a file. */
+const CODE_MESSAGE_CHARS = 4000;
+const CODE_EXTENSIONS: Record<string, string> = { python: "py", javascript: "js", typescript: "ts", bash: "sh", shell: "sh", rust: "rs", markdown: "md", text: "txt" };
 
 /** Buttons under a video or web card: 📝 (until used) asks the AI for a summary; ▶️ / 🔗 opens the original. */
 function linkButtons(url: string, summary: { text: string; callback_data: string } | undefined, open: "▶️" | "🔗") {
@@ -1004,6 +1008,27 @@ export function createBot({
     const note = `⏹ Stopped by ${displayName(ctx.from)}`;
     await ctx.answerCallbackQuery({ text: note });
     await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [[{ text: note.slice(0, 60), callback_data: "rem:done" }]] } }).catch(() => undefined);
+  });
+
+  // 📋 under a longer code block of a long answer (Telegram's copy button holds 256 characters): the block
+  // on its own, where Telegram shows its Copy button; too long for a message, as a file.
+  bot.callbackQuery(CODE_BUTTON, async (ctx) => {
+    const message = ctx.callbackQuery.message;
+    const chatId = ctx.chat?.id;
+    if (!message || chatId === undefined || !("date" in message) || message.date === 0) return ctx.answerCallbackQuery({ text: "This message is too old." });
+    const block = richCodeBlocks(message)[Number(ctx.match![1])];
+    if (!block) return ctx.answerCallbackQuery({ text: "That code block is gone." });
+    await ctx.answerCallbackQuery();
+    const threadId = threadIdOf(message);
+    const other = { reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true }, ...(threadId ? { message_thread_id: threadId } : {}) };
+    const language = /^[\w+#.-]{1,20}$/.test(block.language) ? block.language : "";
+    if (block.code.length <= CODE_MESSAGE_CHARS) {
+      const lang = language ? ` class="language-${escapeHtml(language)}"` : "";
+      await ctx.api.sendMessage(chatId, `<pre><code${lang}>${escapeHtml(block.code)}</code></pre>`, { parse_mode: "HTML", ...other });
+    } else {
+      const ext = CODE_EXTENSIONS[language.toLowerCase()] ?? (/^\w{1,8}$/.test(language) ? language.toLowerCase() : "txt");
+      await ctx.api.sendDocument(chatId, new InputFile(Buffer.from(block.code, "utf8"), `code.${ext}`), other);
+    }
   });
 
   bot.command("watch", (ctx) => {
