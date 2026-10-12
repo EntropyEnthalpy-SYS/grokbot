@@ -3,10 +3,41 @@ export const TELEGRAM_LIMIT = 4096;
 /** Markdown chunk size; leaves room for HTML tags added by conversion. */
 export const CHUNK_LIMIT = 3500;
 
+/** A rich message (Bot API 10.1) holds up to 32,768 characters; leaves room for what richMarkdown adds. */
+export const RICH_LIMIT = 30_000;
+/** In rich messages, code blocks longer than this many lines are collapsed (tap to expand). */
+const COLLAPSE_LINES = 15;
+
 const FENCE = /^\s*```/;
 
 export function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * The Markdown Grok writes, as Telegram rich Markdown: long code blocks collapse behind a
+ * "📄 yaml · 40 lines" bar, and text that looks like an HTML tag ("Vec<String>") is kept
+ * (Telegram would drop it). Code keeps its text as is.
+ */
+export function richMarkdown(markdown: string): string {
+  const out: string[] = [];
+  const lines = markdown.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const open = line.match(/^\s*```\s*([\w+#.-]*)/);
+    if (!open) {
+      out.push(line.split(/(`[^`\n]+`)/).map((part, j) => (j % 2 ? part : part.replace(/&(?=#?\w+;)/g, "&amp;").replace(/</g, "&lt;"))).join(""));
+      continue;
+    }
+    let end = i + 1;
+    while (end < lines.length && !FENCE.test(lines[end]!)) end++;
+    const block = lines.slice(i, end + 1);
+    const size = end - i - 1;
+    if (size > COLLAPSE_LINES) out.push(`<details><summary>📄 ${open[1] || "code"} · ${size} lines</summary>`, "", ...block, "", "</details>");
+    else out.push(...block);
+    i = end;
+  }
+  return out.join("\n");
 }
 
 /**

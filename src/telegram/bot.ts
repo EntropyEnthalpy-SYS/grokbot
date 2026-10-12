@@ -53,6 +53,7 @@ import {
   PLATFORMS,
   PRIVACY_MODES,
   type PrivacyMode,
+  richMessageText,
   startsWithBotName,
   stripAddress,
   threadIdOf,
@@ -1706,7 +1707,7 @@ export function createBot({
     const system = `Translate the user's text into ${target}. If it is already in ${target}, translate it into English instead. Output only the translation, nothing else.`;
     // A message that is itself "/tr" (e.g. a screenshot captioned /tr) has nothing to translate in its text.
     const notCommand = (value: string | undefined) => (value && !/^\/tr(@\w+)?(\s|$)/i.test(value) ? value : "");
-    let text = ownText || notCommand(source?.text) || (ignoreCaption ? "" : notCommand(source?.caption));
+    let text = ownText || notCommand(source?.text) || (ignoreCaption ? "" : notCommand(source?.caption)) || (source && richMessageText(source)) || "";
     if (!text && source && voiceOf(source)) text = (await media.transcribeVoice(source))?.text ?? "";
     if (!text && source && documentOf(source)) {
       const doc = (await media.document(source))!;

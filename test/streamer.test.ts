@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { mock, test } from "node:test";
 import { activityLine, ReplyStreamer, type MessageApi } from "../src/telegram/streamer.ts";
 
-type Call = { method: "send" | "edit"; id?: number; text: string; html: boolean; replyTo?: number };
+type Call = { method: "send" | "edit" | "rich"; id?: number; text: string; html: boolean; replyTo?: number };
 
-function fakeApi(options: { rejectHtml?: boolean } = {}) {
+function fakeApi(options: { rejectHtml?: boolean; rich?: "accept" | "reject" } = {}) {
   const calls: Call[] = [];
   let nextId = 100;
   const api: MessageApi = {
@@ -14,6 +14,11 @@ function fakeApi(options: { rejectHtml?: boolean } = {}) {
       return { message_id: nextId++ };
     },
     async editMessageText(_chat, id, text, other) {
+      if (typeof text !== "string") {
+        if (options.rich === "reject") throw { error_code: 400, description: "Bad Request: RICH_MESSAGE_TEXT_TOO_LONG" };
+        calls.push({ method: "rich", id, text: text.markdown, html: false });
+        return true;
+      }
       if (options.rejectHtml && other?.parse_mode) throw { description: "Bad Request: can't parse entities" };
       const last = calls.filter((c) => c.id === id || c.method === "send").at(-1);
       if (last?.text === text) throw { description: "Bad Request: message is not modified" };
@@ -21,6 +26,13 @@ function fakeApi(options: { rejectHtml?: boolean } = {}) {
       return true;
     },
   };
+  if (options.rich) {
+    api.sendRichMessage = async (_chat, rich, other) => {
+      if (options.rich === "reject") throw { error_code: 400, description: "Bad Request: RICH_MESSAGE_TEXT_TOO_LONG" };
+      calls.push({ method: "rich", text: rich.markdown, html: false, replyTo: other?.reply_parameters?.message_id });
+      return { message_id: nextId++ };
+    };
+  }
   return { api, calls };
 }
 
@@ -81,6 +93,43 @@ test("long final replies continue in new messages chained as replies", async () 
   assert.deepEqual(ids, [100, 101]);
   assert.equal(calls[0]?.replyTo, 7);
   assert.equal(calls[1]?.replyTo, 100);
+});
+
+test("a long answer is one rich message: long code collapses, tag-like text survives; short answers stay plain messages", async () => {
+  const yaml = Array.from({ length: 40 }, (_, i) => `  rule${i}: <b>${i}</b>`).join("\n");
+  const answer = `Use Vec<String> and \`a<b>\`.\n\n${"说明。".repeat(1200)}\n\n\`\`\`yaml\n${yaml}\n\`\`\`\n\n\`\`\`sh\necho short\n\`\`\``;
+  const { api, calls } = fakeApi({ rich: "accept" });
+  const streamer = new ReplyStreamer(api, 1, { replyTo: 7 });
+  assert.deepEqual(await streamer.finish(answer), [100]);
+  assert.equal(calls.length, 1);
+  const sent = calls[0]!;
+  assert.equal(sent.method, "rich");
+  assert.equal(sent.replyTo, 7);
+  assert.match(sent.text, /^Use Vec&lt;String> and `a<b>`\./);
+  assert.match(sent.text, /<details><summary>📄 yaml · 40 lines<\/summary>\n\n```yaml\n  rule0: <b>0<\/b>\n/);
+  assert.match(sent.text, /```\n\n<\/details>\n\n```sh\necho short\n```$/, "a short block stays open");
+
+  const short = fakeApi({ rich: "accept" });
+  await new ReplyStreamer(short.api, 1).finish("**short**");
+  assert.deepEqual(short.calls.map((c) => c.method), ["send"]);
+});
+
+test("a long answer edits the preview into the rich message; if Telegram refuses it, the answer is split as before", async () => {
+  const long = `${"a".repeat(3000)}\n\n${"b".repeat(3000)}`;
+  for (const rich of ["accept", "reject"] as const) {
+    const { api, calls } = fakeApi({ rich });
+    const streamer = new ReplyStreamer(api, 1, { replyTo: 7, throttleMs: 10, minInitialChars: 1 });
+    streamer.update("in progress");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const ids = await streamer.finish(long);
+    if (rich === "accept") {
+      assert.deepEqual(ids, [100]);
+      assert.deepEqual(calls.slice(1).map((c) => [c.method, c.id]), [["rich", 100]]);
+    } else {
+      assert.deepEqual(ids, [100, 101]);
+      assert.deepEqual(calls.slice(1).map((c) => [c.method, c.replyTo ?? c.id]), [["edit", 100], ["send", 100]]);
+    }
+  }
 });
 
 test("falls back to plain text when Telegram rejects the HTML", async () => {

@@ -335,6 +335,22 @@ export function displayName(user: TgUser | undefined): string {
   return (name || user.username || "Unknown").slice(0, 64);
 }
 
+/** The text of a rich message (the bot's long answers), blocks on their own lines; undefined for other messages. */
+export function richMessageText(message: TgMessage): string | undefined {
+  const rich = (message as { rich_message?: unknown }).rich_message;
+  return rich ? richText(rich).trim() : undefined;
+}
+
+function richText(node: unknown): string {
+  if (typeof node === "string") return node;
+  if (Array.isArray(node)) return node.map(richText).join("");
+  if (!node || typeof node !== "object") return "";
+  const { text, summary, blocks, items, rows, cells } = node as Record<string, unknown>;
+  const own = [summary, text].map(richText).filter(Boolean);
+  const children = [blocks, items, rows, cells].flatMap((list) => (Array.isArray(list) ? list.map(richText) : [])).filter(Boolean);
+  return [...own, ...children].join("\n");
+}
+
 /** Thread key: forum topic id, or 0 for normal groups and the General topic. */
 export function threadIdOf(message: TgMessage): number {
   return message.is_topic_message && message.message_thread_id ? message.message_thread_id : 0;
@@ -342,7 +358,7 @@ export function threadIdOf(message: TgMessage): number {
 
 /** One line of text describing any kind of message, with hidden link targets made visible. */
 export function describeMessage(message: TgMessage): string {
-  const body = message.text ?? message.caption ?? "";
+  const body = message.text ?? message.caption ?? richMessageText(message) ?? "";
   const entities = message.entities ?? message.caption_entities;
   const hidden = (entities ?? []).filter((e) => e.type === "text_link" && e.url).map((e) => e.url!);
   const parts: string[] = [];

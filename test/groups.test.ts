@@ -59,6 +59,17 @@ test("describeMessage covers media and reveals hidden link targets", () => {
   assert.equal(describeMessage(msg({ voice: {} })), "[voice message]");
 });
 
+test("describeMessage reads the bot's long answers (rich messages), collapsed blocks included", () => {
+  // Shape as returned by Telegram for "**Config** here.\n\n<details>…```yaml…```</details>".
+  const rich_message = {
+    blocks: [
+      { type: "paragraph", text: [{ type: "bold", text: "Config" }, " here."] },
+      { type: "details", summary: "📄 yaml · 2 lines", blocks: [{ type: "pre", text: "a: 1\nb: 2", language: "yaml" }] },
+    ],
+  };
+  assert.equal(describeMessage(msg({ rich_message } as Partial<TgMessage>)), "Config here.\n📄 yaml · 2 lines\na: 1\nb: 2");
+});
+
 test("topic messages get their topic id; normal and General-topic messages get 0", () => {
   assert.equal(threadIdOf(msg({ is_topic_message: true, message_thread_id: 42 })), 42);
   assert.equal(threadIdOf(msg({ message_thread_id: 42 })), 0);
