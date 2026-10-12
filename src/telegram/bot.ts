@@ -864,7 +864,6 @@ export function createBot({
       }
       // Reply to the translated message itself, so it's clear what the translation belongs to.
       const ids = await new ReplyStreamer(bot.api, chatId, { replyTo: source?.message_id ?? message.message_id, threadId }).finish(`🌐 ${translation}`);
-      answered(chatId, ids);
       if (isGroup(ctx)) logBotMessage(ctx, chatId, threadId, ids[0], `[translation]\n${translation}`);
     });
   }
@@ -890,7 +889,7 @@ export function createBot({
       try {
         const photo = source ? await media.photo(source) : undefined;
         const image = await images.create(sessionKey(chatId, threadId), prompt, { sources: photo ? [photo] : undefined });
-        answered(chatId, await postImages(chatId, [image], message.message_id, threadId));
+        await postImages(chatId, [image], message.message_id, threadId);
         usage.record(chatId, who(ctx), "image");
       } finally {
         clearInterval(timer);
@@ -1126,7 +1125,6 @@ export function createBot({
     try {
       const summary = await summarizeLink(links, url, groups.language(chatId));
       const ids = await new ReplyStreamer(bot.api, chatId, { replyTo: card.message_id, threadId }).finish(summary);
-      answered(chatId, ids);
       logBotMessage(ctx, chatId, threadId, ids[0], `[summary of ${url}]\n${summary}`);
       usage.record(chatId, who(ctx), "card");
       // The summary is posted: only ▶️ Original stays.
@@ -1298,7 +1296,7 @@ export function createBot({
     const threadId = threadIdOf(message);
     // Focused groups keep normal's automatic features (voice transcripts, round videos); only the AI's background differs.
     const normal = groups.privacy(chatId) !== "strict";
-    if (isAddressedToBot(message, me, (id, sentAt) => groups.isAnswer(chatId, id, sentAt))) {
+    if (isAddressedToBot(message, me)) {
       // One answer per album, however many of its pictures count as addressed.
       if (!albums.claim(message)) return;
       if (!mayAsk(ctx, chatId)) return refuseOverLimit(ctx, message, threadId);
@@ -1779,8 +1777,7 @@ export function createBot({
       typing.stop();
       if (speakers.get(target.key) === speaker) speakers.delete(target.key);
       const created = imageTurn ? images.end(imageTurn) : [];
-      answered(chatId, ids);
-      await postImages(ctx.chat!.id, created, target.replyTo, target.threadId).then((imageIds) => answered(chatId, imageIds), async (error) => {
+      await postImages(ctx.chat!.id, created, target.replyTo, target.threadId).catch(async (error) => {
         await ctx.reply(`⚠️ Couldn't post the image: ${errorMessage(error)}`).catch(() => undefined);
       });
       if (created.length) usage.record(chatId, who(ctx), "image", created.length);
@@ -1800,7 +1797,6 @@ export function createBot({
       ...(target.replyTo ? { reply_parameters: { message_id: target.replyTo, allow_sending_without_reply: true } } : {}),
       ...(target.threadId ? { message_thread_id: target.threadId } : {}),
     });
-    answered(ctx.chat!.id, [sent.message_id]);
     usage.record(ctx.chat!.id, who(ctx), "tts", text.length);
   }
 
@@ -1814,10 +1810,6 @@ export function createBot({
     for (const id of ids) logBotMessage(ctx, chatId, threadId, id, text);
   }
 
-  /** The bot's answers in a group: replies to them continue the conversation. */
-  function answered(chatId: number, ids: readonly (number | undefined)[]): void {
-    if (chatId < 0) groups.markAnswer(chatId, ids.filter((id): id is number => id !== undefined));
-  }
 
   function logBotMessage(ctx: Context, chatId: number, threadId: number, messageId: number | undefined, text: string): void {
     // Strict groups keep no log at all: bot answers often quote the person who asked.

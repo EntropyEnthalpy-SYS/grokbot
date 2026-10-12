@@ -252,23 +252,6 @@ export class GroupStore {
     this.#db.prepare("UPDATE groups SET hide_adult = ? WHERE chat_id = ?").run(on ? 1 : 0, chatId);
   }
 
-  /**
-   * Remember the bot's answers in a group (chat replies, images, translations): a reply to one
-   * continues the conversation. A reply to anything else the bot posts (link cards, transcripts,
-   * reminders, previews, notices) is people talking, so it needs "grok," or a mention.
-   * Only message ids are kept (for a week), so this also works in strict groups.
-   */
-  markAnswer(chatId: number, messageIds: readonly number[], now = Date.now()): void {
-    const insert = this.#db.prepare("INSERT OR IGNORE INTO bot_answers (chat_id, message_id, at) VALUES (?, ?, ?)");
-    for (const id of messageIds) insert.run(chatId, id, now);
-  }
-
-  /** Whether a bot message is one of its answers. `sentAt` (ms): older messages, sent before answers were recorded, count as answers. */
-  isAnswer(chatId: number, messageId: number, sentAt: number): boolean {
-    const since = Number((this.#db.prepare("SELECT value FROM settings WHERE key = 'answers_tracked_since'").get() as { value: string } | undefined)?.value ?? 0);
-    if (sentAt < since) return true;
-    return this.#db.prepare("SELECT 1 FROM bot_answers WHERE chat_id = ? AND message_id = ?").get(chatId, messageId) !== undefined;
-  }
 
   /** Whether voice notes are transcribed automatically in this group. */
   voiceMode(chatId: number): VoiceMode {
@@ -343,7 +326,6 @@ export class GroupStore {
     this.#db
       .prepare("DELETE FROM group_log WHERE at < ? AND chat_id IN (SELECT chat_id FROM groups WHERE privacy = 'focused')")
       .run(now - FOCUSED_LOG_MS);
-    this.#db.prepare("DELETE FROM bot_answers WHERE at < ?").run(now - LOG_RETENTION_MS);
   }
 }
 
@@ -424,14 +406,13 @@ function callsBotByName(text: string): boolean {
 }
 
 /**
- * Whether a group message is addressed to the bot: an @mention, starting with its name, or a
- * reply to one of its answers (`isAnswer`). A reply to anything else it posted (cards,
- * transcripts, reminders, notices) is people talking, so it counts only with the name or a mention.
+ * Whether a group message is addressed to the bot: an @mention, starting with its name, or a reply
+ * to any of its messages (answers, cards, transcripts, reminders).
  */
-export function isAddressedToBot(message: TgMessage, bot: Bot, isAnswer: (messageId: number, sentAt: number) => boolean = () => true): boolean {
+export function isAddressedToBot(message: TgMessage, bot: Bot): boolean {
   const replied = message.reply_to_message;
-  // "哈哈", "6", "谢谢", a sticker: a reaction to the answer, not a new question.
-  if (replied?.from?.id === bot.id && isAnswer(replied.message_id, replied.date * 1000) && !isJustReaction(message)) return true;
+  // "哈哈", "6", "谢谢", a sticker: a reaction to the bot's message, not a question.
+  if (replied?.from?.id === bot.id && !isJustReaction(message)) return true;
   const text = message.text ?? message.caption ?? "";
   const entities = (message.entities ?? message.caption_entities ?? []) as (Entity & { user?: TgUser })[];
   for (const entity of entities) {

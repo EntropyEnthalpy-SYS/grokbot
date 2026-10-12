@@ -96,7 +96,7 @@ export function backupWithoutSecrets(db: Db, dir: string, options: { withoutHist
   const copy = new DatabaseSync(path);
   try {
     copy.exec("DELETE FROM credentials; DELETE FROM settings WHERE key = 'device_id';");
-    if (options.withoutHistory) copy.exec("DELETE FROM chats; DELETE FROM group_log; DELETE FROM bot_answers; DELETE FROM link_cache;");
+    if (options.withoutHistory) copy.exec("DELETE FROM chats; DELETE FROM group_log; DELETE FROM link_cache;");
     copy.exec("VACUUM;");
   } finally {
     copy.close();

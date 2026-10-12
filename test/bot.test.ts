@@ -376,7 +376,6 @@ test("pictures sent together (an album) are answered once, with every picture, w
   const h = harness({ loggedIn: true, files: { p1: tempJpeg(), p2: tempJpeg(), p3: tempJpeg(), p4: tempJpeg() } });
   h.groups.enable(GROUP, "Grok bot test");
   const now = Math.ceil(Date.now() / 1000) + 1; // after answers started being recorded
-  h.groups.markAnswer(GROUP, [77]);
   // Replying to an answer with two screenshots: both items reply to it, only the second has the text.
   const answer = { message_id: 77, date: now, chat: { id: GROUP, type: "supergroup" }, from: { id: 999, is_bot: true, first_name: "Grokky" }, text: "加这条规则" };
   const item = (id: string, caption?: string) => h.groupText(5, "", { text: undefined, date: now, photo: photoOf(id), media_group_id: "a1", reply_to_message: answer, ...(caption ? { caption } : {}) });
@@ -949,46 +948,31 @@ test("what members see when a reply has no text, or was cut off at the length li
   assert.match(lastText(), /第一段[\s\S]*cut off at the length limit/);
 });
 
-test("only replies to the bot's answers continue a conversation; replies to its other posts are people talking", async () => {
+test("a reply to any of the bot's messages (answer, card, transcript) is answered; a bare reaction isn't", async () => {
   const voice = join(mkdtempSync(join(tmpdir(), "v-")), "q.ogg");
   writeFileSync(voice, "ogg bytes");
   const h = harness({ loggedIn: true, files: { v1: voice }, distinctIds: true });
   h.groups.enable(GROUP, "Grok bot test");
   h.groups.setPrivacy(GROUP, "normal");
-  const now = Math.ceil(Date.now() / 1000) + 1; // Telegram dates are whole seconds; after answers started being recorded
-  const fromBot = (message_id: number, text: string) => ({ message_id, date: now, chat: { id: GROUP, type: "supergroup" }, from: { id: 999, is_bot: true, first_name: "Grokky" }, text });
-  const sentText = (pattern: RegExp) => h.calls.find((c) => c.method === "sendMessage" && pattern.test(String(c.payload.text)));
-
-  // An answer: the bot's reply to a question.
-  await h.bot.handleUpdate(h.groupText(6, "grok, 几点了"));
-  await h.until((c) => c.method === "sendMessage" && c.payload.text === "ok");
-  const answerId = h.calls.find((c) => c.method === "sendMessage" && c.payload.text === "ok")!.sentId!;
-  // A voice transcript (automatic) and a reminder-style notice (any other bot message).
+  const fromBot = (message_id: number, text: string) => ({ message_id, date: 0, chat: { id: GROUP, type: "supergroup" }, from: { id: 999, is_bot: true, first_name: "Grokky" }, text });
   await h.bot.handleUpdate(h.groupText(5, "", { text: undefined, voice: { file_id: "v1", file_unique_id: "v1", duration: 3 } }));
   await h.until((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("🎙️"));
-  assert.ok(sentText(/^🎙️/));
   const runs = h.runs.length;
 
-  const transcriptId = sentText(/^🎙️/)!.sentId!;
-  await h.bot.handleUpdate(h.groupText(6, "哈哈 他又在问时间", { reply_to_message: fromBot(transcriptId, "🎙️ 現在幾點？") }));
-  await h.bot.handleUpdate(h.groupText(6, "收到", { reply_to_message: fromBot(9999, "⏰ 开会") }));
+  await h.bot.handleUpdate(h.groupText(6, "总结前因后果", { reply_to_message: fromBot(300, "[content of https://x.com/a/status/1]\n𝕏 A @a\n\nsomething happened") }));
   await h.settle();
-  assert.equal(h.runs.length, runs, "transcripts and reminders don't summon the bot");
+  assert.equal(h.runs.length, runs + 1, "a reply to a link card");
+  assert.match(h.runs.at(-1)!.text, /replying to you: "\[content of https:\/\/x\.com\/a\/status\/1\]/, "with the card's content");
+  await h.bot.handleUpdate(h.groupText(6, "他说的对吗", { reply_to_message: fromBot(301, "🎙️ 現在幾點？") }));
+  await h.bot.handleUpdate(h.groupText(6, "那北京呢", { reply_to_message: fromBot(302, "ok") }));
+  await h.settle();
+  assert.equal(h.runs.length, runs + 3, "a reply to a transcript or an answer");
 
-  await h.bot.handleUpdate(h.groupText(6, "grok, 他说的对吗", { reply_to_message: fromBot(transcriptId, "🎙️ 現在幾點？") }));
+  await h.bot.handleUpdate(h.groupText(6, "哈哈哈", { reply_to_message: fromBot(302, "ok") }));
+  await h.bot.handleUpdate(h.groupText(6, "收到", { reply_to_message: fromBot(303, "⏰ 开会") }));
+  await h.bot.handleUpdate(h.groupText(6, "", { text: undefined, sticker: { file_id: "s", file_unique_id: "s", type: "regular", width: 1, height: 1, is_animated: false, is_video: false, emoji: "😂" }, reply_to_message: fromBot(300, "card") }));
   await h.settle();
-  assert.equal(h.runs.length, runs + 1, "with grok, it does");
-  await h.bot.handleUpdate(h.groupText(6, "哈哈哈", { reply_to_message: fromBot(answerId, "ok") }));
-  await h.bot.handleUpdate(h.groupText(6, "", { text: undefined, sticker: { file_id: "s", file_unique_id: "s", type: "regular", width: 1, height: 1, is_animated: false, is_video: false, emoji: "😂" }, reply_to_message: fromBot(answerId, "ok") }));
-  await h.settle();
-  assert.equal(h.runs.length, runs + 1, "laughing at an answer isn't a question");
-  await h.bot.handleUpdate(h.groupText(6, "那北京呢", { reply_to_message: fromBot(answerId, "ok") }));
-  await h.settle();
-  assert.equal(h.runs.length, runs + 2, "a reply to an answer continues the conversation");
-  const old = { ...fromBot(42, "an answer from before the update"), date: 0 };
-  await h.bot.handleUpdate(h.groupText(6, "继续", { reply_to_message: old }));
-  await h.settle();
-  assert.equal(h.runs.length, runs + 3, "bot messages from before answers were recorded still count");
+  assert.equal(h.runs.length, runs + 3, "laughs, “收到” and stickers aren't questions");
 });
 
 test("no cards for t.me links or adult sites (unless the owner shows them); /platforms off upload stops video cards", async () => {
@@ -1071,7 +1055,6 @@ test("a YouTube link gets a plain card (no AI) with 📝 Summary; a tap adds the
   const summary = h.calls.find((c) => c.method === "sendMessage" && String(c.payload.text).includes("山顶的日出"))!;
   assert.equal((summary.payload.reply_parameters as { message_id: number }).message_id, card.sentId, "posted as a reply to the card");
   assert.deepEqual(h.calls.filter((c) => c.method === "editMessageReplyMarkup").at(-1)!.payload.reply_markup, { inline_keyboard: [[{ text: "▶️", url }]] }, "📝 goes, ▶️ stays");
-  assert.equal(h.groups.isAnswer(GROUP, summary.sentId!, Date.now()), true, "replies to the summary continue the conversation");
 
   // Same person again: over their limit (1 per hour), refused without asking the AI.
   await h.bot.handleUpdate(tap(6));

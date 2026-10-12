@@ -160,11 +160,10 @@ export function openDbAt(path: string): Db {
   addColumnIfMissing(db, "reminders", "last_error", "TEXT");
   // 🔞 Skip link cards for adult sites.
   addColumnIfMissing(db, "groups", "hide_adult", "INTEGER NOT NULL DEFAULT 1");
-  // Message ids of the bot's answers in groups: a reply to one continues the conversation. Ids only.
-  db.exec("CREATE TABLE IF NOT EXISTS bot_answers (chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (chat_id, message_id))");
+  // Answers used to be told apart from cards (only replies to answers counted); every reply counts now.
+  db.exec("DROP TABLE IF EXISTS bot_answers");
   db.exec("DROP TABLE IF EXISTS auto_posts");
-  // Replies to bot messages sent before answers were recorded keep counting as questions.
-  db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('answers_tracked_since', ?)").run(String(Date.now()));
+  db.prepare("DELETE FROM settings WHERE key = 'answers_tracked_since'").run();
   // How X posts are shown: "text" (caption under the post's media) or "picture" (drawn like the post).
   addColumnIfMissing(db, "groups", "x_style", "TEXT NOT NULL DEFAULT 'text'");
   migrateTrusted(db);
