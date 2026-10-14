@@ -1,7 +1,7 @@
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { Db } from "../db.ts";
-import { isServerSideToolCall, stripServerSideToolCalls, type Grok } from "../grok/grok.ts";
+import { isServerSideToolCall, serverSearchStarted, stripServerSideToolCalls, type Grok } from "../grok/grok.ts";
 
 /** Messages sent to Grok per request; older ones stay stored but are not sent. */
 export const CONTEXT_MESSAGES = 60;
@@ -50,6 +50,8 @@ export class ChatSessions {
   readonly #systemExtra: (chatKey: string) => string;
   readonly #retentionMs: number;
   readonly #agents = new Map<string, Agent>();
+  /** The running turn of each chat, told when Grok starts one of its own searches. */
+  readonly #onSearch = new Map<string, (name: string) => void>();
   readonly #queues = new Map<string, Promise<unknown>>();
   /**
    * Bumped by reset() while turns are queued, so turns queued before a reset don't start and
@@ -179,6 +181,11 @@ export class ChatSessions {
 
     let text = "";
     const toolsUsed = new Set<string>();
+    const onSearch = (name: string) => {
+      toolsUsed.add(LOOKED_UP);
+      handlers.onActivity?.(name);
+    };
+    this.#onSearch.set(chatKey, onSearch);
     const unsubscribe = agent.subscribe((event: AgentEvent) => {
       if (event.type === "message_start" && event.message.role === "assistant") text = "";
       if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
@@ -188,10 +195,15 @@ export class ChatSessions {
       if (event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_start") {
         const { partial, contentIndex } = event.assistantMessageEvent;
         const block = partial.content[contentIndex];
-        if (block?.type === "toolCall" && block.name) handlers.onActivity?.(block.name);
+        if (block?.type === "toolCall" && block.name) {
+          handlers.onActivity?.(block.name);
+          // Grok's own web/X searches run on its servers: they never reach tool_execution_start.
+          if (SEARCHES.test(block.name)) toolsUsed.add(LOOKED_UP);
+        }
       }
       if (event.type === "tool_execution_start") {
         toolsUsed.add(event.toolName);
+        if (LOOKUP_TOOLS.has(event.toolName)) toolsUsed.add(LOOKED_UP);
         handlers.onTool?.(event.toolName);
       }
     });
@@ -204,7 +216,7 @@ export class ChatSessions {
       const first = lastAssistant(agent.state.messages);
       const firstText = first ? assistantText(first).trim() : "";
       const unfinished = (!firstText && toolsUsed.size === 0) || isBarePromise(firstText);
-      const claim = falseClaim(firstText, toolsUsed);
+      const claim = unfinished ? undefined : falseClaim(firstText, toolsUsed);
       if (first?.stopReason === "stop" && (unfinished || claim)) {
         await agent.prompt(claim ? claim.note : FINISH_NOW);
         // Keep the conversation as question → answer: the promise and the note go, the question's photos stay the latest.
@@ -215,6 +227,7 @@ export class ChatSessions {
       }
     } finally {
       unsubscribe();
+      if (this.#onSearch.get(chatKey) === onSearch) this.#onSearch.delete(chatKey);
       // reset() (/new, /forget, /privacy strict) removed this agent mid-turn: don't write the history back.
       const current = this.#agents.get(chatKey) === agent && generation === this.#generation(chatKey);
       if (ephemeral) {
@@ -238,7 +251,16 @@ export class ChatSessions {
         tools: this.#tools(chatKey),
         messages,
       },
-      streamFn: this.#grok.streamFn,
+      // Grok's own searches only show in the raw stream: tell the running turn about them.
+      streamFn: (model, context, options) =>
+        this.#grok.streamFn(model, context, {
+          ...options,
+          onProviderStreamEvent: (event, eventModel) => {
+            const search = serverSearchStarted(event);
+            if (search) this.#onSearch.get(chatKey)?.(search);
+            return options?.onProviderStreamEvent?.(event, eventModel);
+          },
+        }),
       transformContext: async (messages) => withSystemExtra(trimContext(messages, CONTEXT_MESSAGES), this.#systemExtra(chatKey)),
       sessionId: chatKey,
     });
@@ -381,6 +403,22 @@ export function cleanHistory(messages: readonly AgentMessage[]): AgentMessage[] 
 export const NO_IMAGE_SENT =
   "(automatic note) Your reply says you sent a picture, but no picture was posted: pictures only appear when you call create_image. Either call create_image now (only for a drawing or illustration, never a fake photo of a real person), or say plainly that you can't post that picture, and give a search link instead if it helps.";
 
+/** Any search or read during a reply; facts stated without one came from the model's memory. */
+const LOOKED_UP = "lookup";
+/** Grok's server-side tools (web_search, x_keyword_search, browse_page…). */
+const SEARCHES = /search|browse|^x_/i;
+/** Our tools that look things up. */
+const LOOKUP_TOOLS = new Set(["search_web", "read_link", "watch_video", "read_group_chat"]);
+/** "官网", "官方标价", "according to the official site". */
+const OFFICIAL = /官網|官网|官方(標價|标价|價格|价格|定價|定价|公布|說明|说明|文檔|文档|資料|资料)|\b(according to (the )?official|official (site|website|pricing|price|docs))\b/i;
+/** A price with a period or a plan: "$25/月", "每月 $5", "40刀套餐", "$10 per month". */
+const PRICE = /[$¥€£]\s?\d|\d\s?(美元|美金|刀|USD|RMB)/i;
+const PLAN = /月|年|套餐|訂閱|订阅|額度|额度|價|价|month|year|\/mo\b|plan|subscription|tier|credit/i;
+
+/** Sent when a reply states current facts (or says it checked) but nothing was searched or read. */
+export const UNCHECKED_FACTS =
+  "(automatic note) Your reply states current facts (prices, plans, what an official site says) or says you checked, but you didn't search or read anything in this reply: it came from memory, which is often outdated or wrong. Search now (the official site first; third-party pages are often old) and answer only from what you find; leave out what you can't confirm and say so. If you can't search, say you can't confirm it right now. If the numbers only come from the question or are plain arithmetic, give the same answer again.";
+
 /** Things the bot can only do through a tool; saying it did them without the tool is a false claim. */
 const CLAIMS: { action: string; tool?: string; says: (sentence: string) => boolean; note: string; refusal?: boolean }[] = [
   { action: "image", tool: "create_image", says: (s) => claimsImageSent(s), note: NO_IMAGE_SENT },
@@ -415,7 +453,19 @@ const CLAIMS: { action: string; tool?: string; says: (sentence: string) => boole
     says: (s) => /((已|會|会|到時|到时|屆時|届时)(幫你|帮你|給你|给你)?(設|设|定)?(好)?(提醒|叫你)|提醒(已|設好|设好|定好))|\b(i'?ll remind|i will remind|reminder (is )?set|i'?ve set (a|the|your) reminder)\b/i.test(s),
     note: "(automatic note) Your reply says a reminder was set, but you can't set reminders in a reply: nothing was scheduled. Say so, and tell them to send: /remind <time> <what>, e.g. /remind 明天9点 开会.",
   },
+  {
+    // "我去对一下…" followed by an answer from memory; "官方标价是…"; "Pro $25/月".
+    action: "unchecked facts",
+    tool: LOOKED_UP,
+    says: (s) => announcesLookup(s) || OFFICIAL.test(s) || (PRICE.test(s) && PLAN.test(s)),
+    note: UNCHECKED_FACTS,
+  },
 ];
+
+/** "我去对一下 OpenCode 的价格。", "Let me check the docs." (the clause that announces a lookup). */
+function announcesLookup(sentence: string): boolean {
+  return sentence.split(/[，,：:]/).some((c) => LOOKUP.test(c) && PROMISE.test(c) && !NOT_PROMISE.test(c));
+}
 
 /** "不會提醒", "can't remember", "没保存": a sentence that denies the action isn't a claim. */
 const DENIES = /不|沒|没|無法|无法|未|別|别|can'?t|cannot|won'?t|didn'?t|not\b|unable/i;

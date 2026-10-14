@@ -616,6 +616,15 @@ export function withHostedSearch(payload: unknown): unknown {
  * fail with "tool not found", and re-ask Grok, replacing the real answer.
  * Our own tools are plain function tools (`fc_…` ids), so they are kept.
  */
+/**
+ * Grok's searches as they start: "web_search_call", "x_search_call". xAI now reports them as their own
+ * Responses output items, which pi-ai doesn't turn into anything, so they are read from the raw stream.
+ */
+export function serverSearchStarted(event: unknown): string | undefined {
+  const { type, item } = (event ?? {}) as { type?: unknown; item?: { type?: unknown } };
+  return type === "response.output_item.added" && typeof item?.type === "string" && /^\w+_search_call$/.test(item.type) ? item.type : undefined;
+}
+
 export function isServerSideToolCall(block: AssistantMessage["content"][number]): boolean {
   return block.type === "toolCall" && /\|ctc_/.test(block.id);
 }

@@ -408,17 +408,22 @@ test("claims of actions that didn't happen (note, poll, reminder, picture) are c
     ["投票已发起，大家投吧", "poll"], ["帮你开了一个投票", "poll"], ["好，明天9点会提醒你们。", "reminder"], ["到时叫你", "reminder"], ["I'll remind you at 9.", "reminder"],
     ["文件已发，保存为 `iplc-ss.md`，用 Obsidian 直接打开。", "file"], ["檔案已附上。", "file"], ["文件在上面，存成 `iplc-ss.md` 即可。", "file"], ["The file is above.", "file"], ["Here's the file.", "file"],
     ["这里发不出文件。新建笔记，粘贴下面内容。", "file refusal"], ["这里发不出附件。把下面存成 `iplc-ss.md`。", "file refusal"], ["I can't send files here, copy this:", "file refusal"],
+    // A real answer from memory: it announced a check, cited the "official" price and made up three plans.
+    ["我去对一下 OpenCode 现在除了 Go 还有哪些档、各多少钱。除了 Go，还有 Free、Pro、Max。", "unchecked facts"],
+    ["官方标价是美元，按月付：", "unchecked facts"], ["- **Pro $25/月**（首月 $10）：$50 额度", "unchecked facts"], ["Let me check: the Pro plan is $25/month.", "unchecked facts"],
   ];
   assert.deepEqual(claims.filter(([t, action]) => falseClaim(t, none)?.action !== action), [], "missed or misread claims");
   const fine = [
     "我没法设提醒，用 /remind 吧。", "我不会记住这个。", "你记住了吗？", "上次的投票结果是拉面赢了。", "要我开个投票吗？",
     "提醒一下，明天放假。", "记得带伞。", "这个设定挺合理。", "Not noted, sorry.", "我记得你说过这个。", "你发起的投票我看到了。",
     "你发的文件我看过了。", "这个文件讲的是预算。", "把文件拖进 Obsidian 就行。",
+    "我看过了，这个链接讲的是电池。", "你可以自己去官网看看吗？", "10 乘以 12 等于 120。", "要我查一下价格吗？", "现在是下午 5 点。",
   ];
   assert.deepEqual(fine.filter((t) => falseClaim(t, none)), [], "not claims");
   assert.equal(falseClaim("好的，记住了。", new Set(["remember"])), undefined, "the tool ran: true");
   assert.equal(falseClaim("投票已发起", new Set(["create_poll"])), undefined);
   assert.equal(falseClaim("文件已发。", new Set(["send_file"])), undefined);
+  assert.equal(falseClaim("官网：Go $10/月。", new Set(["lookup"])), undefined, "searched: fine");
 });
 
 test("tool steps are reported as they start, including searches Grok runs on its own servers", { timeout: 5000 }, async () => {
@@ -441,6 +446,41 @@ test("tool steps are reported as they start, including searches Grok runs on its
   const steps: string[] = [];
   await sessions.run("tg:-1", { text: "what's new on X?" }, { onActivity: (name) => steps.push(name) });
   assert.deepEqual(steps, ["x_keyword_search"]);
+});
+
+test("prices stated from memory are sent back to be searched; the same answer after a search (even Grok's own) stands", { timeout: 5000 }, async () => {
+  const { UNCHECKED_FACTS } = await import("../src/agent/sessions.ts");
+  for (const searched of [false, true]) {
+    const prompts: string[] = [];
+    const grok = {
+      model: () => model,
+      streamFn: (_model: unknown, context: { messages: { role: string; content: unknown }[] }, options?: { onProviderStreamEvent?: (event: unknown, model: unknown) => void }) => {
+        const last = context.messages.at(-1)!;
+        prompts.push(typeof last.content === "string" ? last.content : JSON.stringify(last.content));
+        const stream = createAssistantMessageEventStream();
+        const text = prompts.length === 1 ? "OpenCode Pro 是 $25/月。" : "官网只有 Go $10/月 和 Go Plus $40/月。";
+        const message = { role: "assistant", content: [{ type: "text", text }], api: model.api, provider: model.provider, model: model.id, usage: zero, stopReason: "stop", timestamp: Date.now() } as unknown as AssistantMessage;
+        queueMicrotask(() => {
+          stream.push({ type: "start", partial: { ...message, content: [] } });
+          // Grok reports its searches only in the raw stream ("web_search_call" items).
+          if (searched) options?.onProviderStreamEvent?.({ type: "response.output_item.added", item: { type: "web_search_call" } }, model);
+          stream.push({ type: "done", reason: "stop", message });
+        });
+        return stream;
+      },
+    };
+    const sessions = new ChatSessions({ db: openDbAt(":memory:"), grok: grok as never, systemPrompt: () => "", tools: () => [] });
+    const steps: string[] = [];
+    const reply = await sessions.run("tg:-1", { text: "OpenCode 有什么套餐？" }, { onActivity: (name) => steps.push(name) });
+    if (searched) {
+      assert.equal(prompts.length, 1, "searched: answered at once");
+      assert.deepEqual(steps, ["web_search_call"], "and the search shows as a status");
+    } else {
+      assert.equal(prompts.length, 2);
+      assert.match(prompts[1]!, new RegExp(UNCHECKED_FACTS.slice(0, 40).replace(/[()]/g, "\\$&")));
+      assert.match(JSON.stringify(reply.content), /Go Plus/, "the searched answer is the one sent");
+    }
+  }
 });
 
 test("focused history keeps only the last few questions with their answers", async () => {
