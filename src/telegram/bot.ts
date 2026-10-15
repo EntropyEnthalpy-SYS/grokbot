@@ -62,6 +62,9 @@ import {
   type LinkMode,
 } from "./groups.ts";
 import { activityLine, ReplyStreamer } from "./streamer.ts";
+import { groupConversation, personalKey, sessionKey } from "./conversations.ts";
+
+export { sessionKey };
 import { AlbumCollector } from "./albums.ts";
 import type { FileDesk } from "../agent/files.ts";
 import { editParagraphs, openForEdit, wantsEditedFile } from "../media/edit.ts";
@@ -117,10 +120,9 @@ export const COMMANDS = [
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
-/** Focused privacy: questions and answers kept for follow-ups. */
-const FOCUSED_TURNS = 6;
-/** Normal privacy: the group's shared conversation with the bot keeps this many questions and answers. */
-const NORMAL_TURNS = 20;
+/** How much of a replied-to message Grok sees: all of it, or a reminder when its conversation is the history. */
+const FULL_QUOTE_CHARS = 4000;
+const REMINDER_QUOTE_CHARS = 300;
 /** /tidy: how long setting replies stay. */
 const TIDY_DELAY_MS = 2 * 60 * 1000;
 /** AI-written scheduled posts per chat (each run uses the AI). */
@@ -208,12 +210,11 @@ type ChatTarget = {
   key: string;
   replyTo?: number;
   threadId?: number;
-  logGroup?: { chatId: number; threadId: number };
   /** The question came by voice: answer with a voice note too. */
   speak?: boolean;
-  /** Focused privacy: only the last few questions and answers are kept and re-sent. */
+  /** Send only the last few questions and answers (see conversations.ts). */
   history?: { turns: number; maxAgeMs: number };
-  /** Strict privacy: the conversation is never stored. */
+  /** A focused group's question that carries the group chat: the conversation is never stored. */
   ephemeral?: boolean;
 };
 
@@ -749,7 +750,10 @@ export function createBot({
   bot.command(
     "new",
     ownerInGroups(async (ctx) => {
-      sessions.reset(sessionKey(ctx.chat!.id, ctx.message ? threadIdOf(ctx.message) : 0));
+      const threadId = ctx.message ? threadIdOf(ctx.message) : 0;
+      sessions.reset(sessionKey(ctx.chat!.id, threadId));
+      // Strict and focused groups keep one conversation per person: the sender's starts over too.
+      if (isGroup(ctx) && ctx.from) sessions.reset(personalKey(ctx.chat!.id, threadId, ctx.from.id));
       await ctx.reply("🆕 New conversation.");
     }),
   );
@@ -879,7 +883,7 @@ export function createBot({
       }
       // Reply to the translated message itself, so it's clear what the translation belongs to.
       const ids = await new ReplyStreamer(bot.api, chatId, { replyTo: source?.message_id ?? message.message_id, threadId }).finish(`🌐 ${translation}`);
-      if (isGroup(ctx)) logBotMessage(ctx, chatId, threadId, ids[0], `[translation]\n${translation}`);
+      logBotMessage(ctx, chatId, threadId, ids, `[translation]\n${translation}`);
     });
   }
 
@@ -1161,7 +1165,7 @@ export function createBot({
     try {
       const summary = await summarizeLink(links, url, groups.language(chatId));
       const ids = await new ReplyStreamer(bot.api, chatId, { replyTo: card.message_id, threadId }).finish(summary);
-      logBotMessage(ctx, chatId, threadId, ids[0], `[summary of ${url}]\n${summary}`);
+      logBotMessage(ctx, chatId, threadId, ids, `[summary of ${url}]\n${summary}`);
       usage.record(chatId, who(ctx), "card");
       // The summary is posted: only ▶️ Original stays.
       await ctx.editMessageReplyMarkup({ reply_markup: linkButtons(url, undefined, open) }).catch(() => undefined);
@@ -1284,16 +1288,17 @@ export function createBot({
     if (message.text && repliedFile) {
       return background(ctx, async () => {
         if (await wantsEditedFile(ask, message.text!)) return editFile(ctx, message, repliedFile, message.text!, 0);
-        await chat(ctx, { text: skills.expand(ctx.chat!.id, message.text!).text }, { key });
+        await chat(ctx, { text: replyContext(ctx, message, key) + skills.expand(ctx.chat!.id, message.text!).text }, { key });
       });
     }
-    if (message.text) return background(ctx, () => chat(ctx, { text: skills.expand(ctx.chat.id, message.text!).text }, { key }));
+    if (message.text) return background(ctx, () => chat(ctx, { text: replyContext(ctx, message, key) + skills.expand(ctx.chat.id, message.text!).text }, { key }));
     if (message.photo) {
       return background(ctx, async () => {
         const album = (await albums.complete(message)).filter((m) => m.photo);
         const pictures = (await Promise.all(album.map((m) => media.photo(m)))).filter((image) => image !== undefined);
         const caption = album.find((m) => m.caption)?.caption;
-        await chat(ctx, { text: caption || (pictures.length > 1 ? "What's in these images?" : "What's in this image?"), images: pictures }, { key });
+        const question = caption || (pictures.length > 1 ? "What's in these images?" : "What's in this image?");
+        await chat(ctx, { text: replyContext(ctx, message, key) + question, images: pictures }, { key });
       });
     }
     if (voiceOf(message)) {
@@ -1303,7 +1308,7 @@ export function createBot({
         if (!result?.text) return void (await ctx.reply("🎙️ I couldn't hear any speech in that."));
         usage.record(ctx.chat.id, who(ctx), "voice_sec", voiceOf(message)?.duration ?? 0);
         await ctx.reply(`🎙️ ${result.text}`);
-        await chat(ctx, { text: result.text }, { key, speak: true });
+        await chat(ctx, { text: replyContext(ctx, message, key) + result.text }, { key, speak: true });
       });
     }
     if (videoOf(message)) {
@@ -1329,6 +1334,23 @@ export function createBot({
     }
     return ctx.reply("I can read text, links, photos, voice messages, videos and documents (PDF, Word, PowerPoint, text).");
   });
+
+  /**
+   * Private chat: what a message replies to (the bot's full answer or card, or the person's own earlier
+   * message), so "what about the second one?" on an old answer works. Answers still in the
+   * conversation get a short reminder; the rest are quoted in full.
+   */
+  function replyContext(ctx: Context, message: Message, key: string): string {
+    const reply = message.reply_to_message;
+    if (!reply) return "";
+    const sent = sessions.sent.get(ctx.chat!.id, reply.message_id);
+    const text = sent?.text ?? describeMessage(reply);
+    if (!text) return "";
+    const max = sent?.chatKey === key ? REMINDER_QUOTE_CHARS : FULL_QUOTE_CHARS;
+    const quoted = text.length > max ? `${text.slice(0, max)}…` : text;
+    const whose = reply.from?.id === ctx.me.id ? "your earlier message" : "their earlier message";
+    return `[Replying to ${whose}: "${quoted}"]\n\n`;
+  }
 
   /** Switching to focused: the stored conversation carried group chat with it, so it goes; the log keeps one day. */
   function applyFocused(chatId: number): void {
@@ -1427,7 +1449,6 @@ export function createBot({
     const fileSource = editableFile(message) ?? (realReply(message) && editableFile(realReply(message)!));
     if (fileSource && (await wantsEditedFile(ask, request))) return editFile(ctx, message, fileSource, request, threadId);
     const privacy = groups.privacy(chatId);
-    const strict = privacy === "strict";
     const reply = realReply(message);
     const images: ImageContent[] = [];
     const notes: string[] = [];
@@ -1456,8 +1477,20 @@ export function createBot({
     const asked = skills.expand(chatId, stripAddress(ownText ?? describeMessage(message), me)).text;
     const text = album.length > 1 ? `${asked}\n(${album.length} pictures sent together, all attached)` : asked;
     // Focused: the recent group chat only for a question about it ("tldr"), and then that turn isn't kept.
-    const aboutChat = asksAboutChat(asked);
+    // Only "grok", not as a reply: it's about what was just said, so the chat comes too.
+    const aboutChat = asksAboutChat(asked) || (!asked && !reply);
     const withChat = privacy === "normal" || (privacy === "focused" && aboutChat);
+    // The bot's own messages are kept in every mode, with the conversation behind each answer.
+    const repliedSent = reply ? sessions.sent.get(chatId, reply.message_id) : undefined;
+    const conversation = groupConversation({
+      chatId,
+      threadId,
+      privacy,
+      userId: message.from?.id,
+      messageId: message.message_id,
+      repliedTo: repliedSent,
+      withChat: privacy === "focused" && withChat,
+    });
     let prompt = buildGroupPrompt({
       title: "title" in ctx.chat! ? ctx.chat.title : undefined,
       context: withChat ? groups.contextSinceLastReply(chatId, threadId, message.message_id, Date.now(), aboutChat) : [],
@@ -1467,20 +1500,23 @@ export function createBot({
       replyTo: reply
         ? {
             name: displayName(reply.from),
-            text: groups.loggedText(chatId, reply.message_id) ?? describeMessage(reply),
+            text: repliedSent?.text ?? groups.loggedText(chatId, reply.message_id) ?? describeMessage(reply),
             isBot: reply.from?.id === me.id,
+            // Continuing that answer's conversation: it's in the history already, a reminder is enough.
+            chars: conversation.continued ? REMINDER_QUOTE_CHARS : FULL_QUOTE_CHARS,
           }
         : undefined,
     });
     if (notes.length) prompt += `\n\n${untrusted("attached-media", notes.join("\n\n"))}`;
-    // Strict (and a focused question that carries the group chat): a throwaway conversation per question,
-    // never written to disk. Focused otherwise: the last few questions and answers of the day, for follow-ups.
-    const ephemeral = strict || (privacy === "focused" && withChat);
-    const key = ephemeral ? `${sessionKey(chatId, threadId)}:q${message.message_id}` : sessionKey(chatId, threadId);
-    // The whole group shares one conversation with the bot: keep it to the latest questions of the day.
-    const history = ephemeral ? undefined : { turns: privacy === "focused" ? FOCUSED_TURNS : NORMAL_TURNS, maxAgeMs: DAY };
     const speak = ownText !== undefined && groups.voiceReply(chatId);
-    await chat(ctx, { text: prompt, images }, { key, replyTo: message.message_id, threadId, logGroup: { chatId, threadId }, speak, ephemeral, history });
+    await chat(ctx, { text: prompt, images }, {
+      key: conversation.key,
+      replyTo: message.message_id,
+      threadId,
+      speak,
+      ephemeral: conversation.ephemeral,
+      history: conversation.history,
+    });
   }
 
   const ask = (system: string, prompt: string) => grok.ask(system, prompt);
@@ -1518,7 +1554,7 @@ export function createBot({
       const caption = `✏️ <b>${escapeHtml(result.doc.name)}</b> · ${result.edits.size} paragraph${result.edits.size === 1 ? "" : "s"} changed\n${points}`.slice(0, 1000);
       const sent = await bot.api.sendDocument(chatId, new InputFile(result.file, result.doc.name), { caption, parse_mode: "HTML", ...replyTo });
       await bot.api.deleteMessage(chatId, status.message_id).catch(() => undefined);
-      if (isGroup(ctx)) logBotMessage(ctx, chatId, threadId, sent.message_id, `[edited file ${result.doc.name}]\n${result.summary.join("\n")}`);
+      logBotMessage(ctx, chatId, threadId, [sent.message_id], `[edited file ${result.doc.name}]\n${result.summary.join("\n")}`);
     } catch (error) {
       await bot.api
         .editMessageText(chatId, status.message_id, `⚠️ I couldn't edit ${fileName}: ${errorMessage(error)}`)
@@ -1885,14 +1921,15 @@ export function createBot({
             ...(target.replyTo ? { reply_parameters: { message_id: target.replyTo, allow_sending_without_reply: true } } : {}),
             ...(target.threadId ? { message_thread_id: target.threadId } : {}),
           })
-          .then((sent) => target.logGroup && logBotMessage(ctx, target.logGroup.chatId, target.logGroup.threadId, sent.message_id, `[file ${file.name}]`))
+          .then((sent) => logBotMessage(ctx, chatId, target.threadId ?? 0, [sent.message_id], `[file ${file.name}]`, target.ephemeral ? undefined : target.key))
           .catch(async (error) => void (await ctx.reply(`⚠️ Couldn't send ${file.name}: ${errorMessage(error)}`).catch(() => undefined)));
       }
     }
     if (target.speak && finalText) {
       await speakReply(ctx, finalText, target).catch((error) => console.warn(`voice reply failed: ${errorMessage(error)}`));
     }
-    if (target.logGroup && finalText) logBotMessage(ctx, target.logGroup.chatId, target.logGroup.threadId, ids[0], finalText);
+    // Failures too: "try again" as a reply to the error continues the same conversation.
+    logBotMessage(ctx, chatId, target.threadId ?? 0, ids, finalText ?? "(no answer)", target.ephemeral ? undefined : target.key);
   }
 
   /** Read an answer aloud (xAI text-to-speech) and send it as a voice note under the text. */
@@ -1914,14 +1951,22 @@ export function createBot({
 
   /** A card or transcript the bot posted by itself (not an answer: replies to it aren't questions). */
   function autoPost(ctx: Context, chatId: number, threadId: number, ids: readonly number[], text: string): void {
-    for (const id of ids) logBotMessage(ctx, chatId, threadId, id, text);
+    logBotMessage(ctx, chatId, threadId, ids, text);
   }
 
 
-  function logBotMessage(ctx: Context, chatId: number, threadId: number, messageId: number | undefined, text: string): void {
-    // Strict groups keep no log at all: bot answers often quote the person who asked.
-    if (messageId === undefined || groups.privacy(chatId) === "strict") return;
-    groups.log(chatId, threadId, { messageId, userId: ctx.me.id, name: ctx.me.first_name, text, isBot: true, at: Date.now() });
+  /**
+   * Remember what the bot posted: in every chat for replies to it (full text, and for answers the
+   * conversation that wrote them), and in the group log unless the group is strict.
+   */
+  function logBotMessage(ctx: Context, chatId: number, threadId: number, messageIds: readonly number[], text: string, chatKey?: string): void {
+    if (messageIds.length === 0) return;
+    sessions.sent.record(chatId, messageIds, text, chatKey);
+    // Strict groups keep no group log: bot answers often quote the person who asked.
+    if (chatId > 0 || groups.privacy(chatId) === "strict") return;
+    for (const messageId of messageIds) {
+      groups.log(chatId, threadId, { messageId, userId: ctx.me.id, name: ctx.me.first_name, text, isBot: true, at: Date.now() });
+    }
   }
 
   // Inline mode: "@bot <link>" in any chat. Owner only unless INLINE_PUBLIC is set (translations use the Grok quota).
@@ -1963,20 +2008,21 @@ export function privacyText(mode: PrivacyMode): string {
   if (mode === "focused") {
     return [
       "🎯 <b>Privacy: focused</b>",
-      "• When someone asks me, Grok sees that message, the one it replies to, the /lm notes and my last few answers here (up to 6, 1 day) for follow-ups.",
+      "• When someone asks me, Grok sees that message, the one it replies to, the /lm notes, and that person's last few questions to me (30 min) for follow-ups. Replying to one of my answers continues that conversation.",
       "• The group chat goes to Grok only for a question about it (<code>grok tldr</code>, “grok, 刚才说了什么”), or when Grok decides a question needs it; it isn't kept afterwards.",
       "• Keys, passwords, server logins, emails, phone and card numbers in others' messages are hidden before anything is sent.",
       "• Group messages are stored on the bot's server for 1 day, for that.",
       "• Voice notes are transcribed automatically (/voice).",
       "",
-      "Owner: <code>/privacy strict</code> stores nothing · <code>/privacy normal</code> sends recent chat with every question.",
+      "Owner: <code>/privacy strict</code> never sends the group chat · <code>/privacy normal</code> sends recent chat with every question.",
     ].join("\n");
   }
   return mode === "strict"
     ? [
         "🔒 <b>Privacy: strict</b>",
         "• Group messages are <b>not stored</b> and <b>never sent to Grok</b> as background.",
-        "• When someone asks me, Grok sees only that message, the one it replies to, and the notes saved with /lm. No memory between questions.",
+        "• When someone asks me, Grok sees only that message, the one it replies to, the notes saved with /lm, and that person's last few questions to me (30 min). Replying to one of my answers continues that conversation; in a forum topic the topic is one conversation.",
+        "• Only questions to me and my answers are kept on the bot's server (7 days) for that; nobody else's messages.",
         "• Voice notes and round video messages are processed only when someone asks me about one.",
         "• Shared links and uploaded videos still get content cards (only that content is processed).",
         "• Image requests send only the description (and the photo to change) to xAI; images are not stored.",
@@ -1986,17 +2032,13 @@ export function privacyText(mode: PrivacyMode): string {
     : [
         "🔓 <b>Privacy: normal</b>",
         "• Group messages are stored on the bot's server for 7 days.",
-        "• When someone asks me, Grok also sees up to 30 recent messages (last 24 h) and the group's last 20 questions to me and my answers (1 day).",
+        "• When someone asks me, Grok also sees up to 30 recent messages (last 24 h) and the group's last 20 questions to me and my answers (1 day). Replying to one of my answers continues that conversation.",
         "• Voice notes are transcribed automatically (/voice).",
         "",
         "Owner: <code>/privacy strict</code> stops this and deletes what is stored. <code>/forget</code> deletes it without changing the mode.",
       ].join("\n");
 }
 
-/** One conversation per private chat, group, or forum topic. */
-export function sessionKey(chatId: number, threadId: number): string {
-  return threadId ? `tg:${chatId}:topic:${threadId}` : `tg:${chatId}`;
-}
 
 /**
  * The message being replied to, ignoring the forum quirk where every message in

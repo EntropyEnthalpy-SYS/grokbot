@@ -121,6 +121,17 @@ export function openDbAt(path: string): Db {
       created_at INTEGER NOT NULL,
       PRIMARY KEY (chat_id, name)
     );
+    -- Everything the bot posted (answers, cards, transcripts), in every privacy mode: a reply to any of
+    -- it gets the full text, and a reply to an answer continues the conversation that wrote it.
+    CREATE TABLE IF NOT EXISTS sent_messages (
+      chat_id    INTEGER NOT NULL,
+      message_id INTEGER NOT NULL,
+      chat_key   TEXT,
+      text       TEXT NOT NULL,
+      at         INTEGER NOT NULL,
+      PRIMARY KEY (chat_id, message_id)
+    );
+    CREATE INDEX IF NOT EXISTS sent_messages_at ON sent_messages (at);
     -- Extracted page text and generated summaries, keyed by normalized URL.
     CREATE TABLE IF NOT EXISTS link_cache (
       url        TEXT PRIMARY KEY,

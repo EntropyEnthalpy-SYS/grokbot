@@ -499,3 +499,86 @@ test("a group chat read for one answer is not kept for later questions", async (
   assert.doesNotMatch(a!.content[0]!.text, /secret/);
   assert.equal(b!.content[0]!.text, "page");
 });
+
+/** A Grok that replies with `parts` in turn: text pieces, with "search" standing for one of Grok's own searches. */
+function scriptedGrok(replies: { parts: string[]; error?: boolean }[], seen: { role: string; content: unknown }[][] = []) {
+  let call = 0;
+  return {
+    model: () => model,
+    streamFn: (_model: unknown, context: { messages: { role: string; content: unknown }[] }, options?: { onProviderStreamEvent?: (event: unknown, model: unknown) => void }) => {
+      seen.push(context.messages);
+      const { parts, error } = replies[Math.min(call++, replies.length - 1)]!;
+      const text = parts.filter((p) => p !== "search").join("");
+      const message = { role: "assistant", content: [{ type: "text", text }], api: model.api, provider: model.provider, model: model.id, usage: zero, stopReason: error ? "error" : "stop", timestamp: Date.now() } as unknown as AssistantMessage;
+      const stream = createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        // Like pi-ai: raw provider events are seen as they arrive, the agent's events only later.
+        options?.onProviderStreamEvent?.({ type: "response.created" }, model);
+        stream.push({ type: "start", partial: { ...message, content: [] } });
+        let sofar = "";
+        for (const part of parts) {
+          if (part === "search") {
+            options?.onProviderStreamEvent?.({ type: "response.output_item.added", item: { type: "web_search_call" } }, model);
+            continue;
+          }
+          options?.onProviderStreamEvent?.({ type: "response.output_text.delta", delta: part }, model);
+          sofar += part;
+          stream.push({ type: "text_delta", contentIndex: 0, delta: part, partial: { ...message, content: [{ type: "text", text: sofar }] } } as never);
+        }
+        if (error) stream.push({ type: "error", reason: "error", error: { ...message, content: [], errorMessage: "network down" } as never });
+        else stream.push({ type: "done", reason: "stop", message });
+      });
+      return stream;
+    },
+  };
+}
+
+const textOf = (message: { content: unknown } | undefined) => JSON.stringify(message?.content ?? "");
+
+test("text Grok wrote before its last search (“先查一下…”, a first draft) is not part of the answer", { timeout: 5000 }, async () => {
+  const seen: { role: string; content: unknown }[][] = [];
+  const grok = scriptedGrok([{ parts: ["先查一下官网价格。", "search", "Go 每月 $10，Go Plus 每月 $40。"] }, { parts: ["好的"] }], seen);
+  const sessions = new ChatSessions({ db: openDbAt(":memory:"), grok: grok as never, systemPrompt: () => "", tools: () => [] });
+  const reply = await sessions.run("tg:-1", { text: "OpenCode Go 多少钱？" });
+  assert.equal(textOf(reply), JSON.stringify([{ type: "text", text: "Go 每月 $10，Go Plus 每月 $40。" }]));
+  await sessions.run("tg:-1", { text: "谢谢" });
+  assert.doesNotMatch(JSON.stringify(seen[1]), /先查一下/, "nor of the conversation sent later");
+  // No search, or nothing after it: the text stands as written.
+  const plain = new ChatSessions({ db: openDbAt(":memory:"), grok: scriptedGrok([{ parts: ["你好，", "有什么可以帮你？"] }]) as never, systemPrompt: () => "", tools: () => [] });
+  assert.match(textOf(await plain.run("tg:-1", { text: "hi" })), /你好，有什么可以帮你/);
+});
+
+test("a failed answer stays an error for the person, and the next question still sees what they were shown", { timeout: 5000 }, async () => {
+  const seen: { role: string; content: unknown }[][] = [];
+  const grok = scriptedGrok([{ parts: ["部分回答：第一步是"], error: true }, { parts: ["继续：第二步"] }], seen);
+  const sessions = new ChatSessions({ db: openDbAt(":memory:"), grok: grok as never, systemPrompt: () => "", tools: () => [] });
+  const failed = await sessions.run("tg:-1", { text: "怎么做？" });
+  assert.equal(failed.stopReason, "error", "the caller still shows the error");
+  await sessions.run("tg:-1", { text: "继续" });
+  const history = JSON.stringify(seen[1]);
+  assert.match(history, /部分回答：第一步是/);
+  assert.match(history, /failed before it was finished/);
+});
+
+test("a history window limits what is sent, not what is kept: a later turn without one sees the older questions", { timeout: 5000 }, async () => {
+  const seen: { role: string; content: unknown }[][] = [];
+  const sessions = new ChatSessions({ db: openDbAt(":memory:"), grok: scriptedGrok([{ parts: ["ok"] }], seen) as never, systemPrompt: () => "", tools: () => [] });
+  const window = { turns: 1, maxAgeMs: 60_000 };
+  for (const q of ["q1", "q2", "q3"]) await sessions.run("tg:-1:u:5", { text: q }, {}, { history: window });
+  assert.doesNotMatch(JSON.stringify(seen[2]), /q1|q2/, "the window sends only the latest turn");
+  await sessions.run("tg:-1:u:5", { text: "q4" });
+  assert.match(JSON.stringify(seen[3]), /q1.*q2.*q3/s, "all kept for a reply to an older answer");
+});
+
+test("the history sent stays within its budget: long texts in earlier turns are shortened, then the oldest turns go", async () => {
+  const { fitBudget } = await import("../src/agent/sessions.ts");
+  const m = (role: string, text: string) => ({ role, content: [{ type: "text", text }] }) as never as AgentMessage;
+  const doc = "D".repeat(20_000);
+  const messages = [m("system", "s"), m("user", `old ${doc}`), m("assistant", "summary of doc"), m("user", "x".repeat(9_000)), m("assistant", "a2"), m("user", `latest ${doc}`)];
+  const fitted = fitBudget(messages, 25_000).map((x) => (x as unknown as { content: { text: string }[] }).content[0]!.text);
+  assert.equal(fitted[0], "s");
+  assert.equal(fitted.at(-1), `latest ${doc}`, "the latest question is sent whole");
+  assert.ok(!fitted.some((t) => t.startsWith("old")), "the oldest turn went once shortening wasn't enough");
+  assert.ok(fitted.some((t) => t.includes("characters left out")), "the remaining earlier long text is shortened");
+  assert.deepEqual(fitBudget(messages, 1_000_000).length, messages.length, "under budget: every turn stays");
+});

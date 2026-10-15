@@ -415,6 +415,18 @@ export function isJustReaction(message: TgMessage): boolean {
   return words === "" || REACTION_WORDS.test(words);
 }
 
+/** Laughter and stickers stay reactions even under a question. */
+const LAUGHTER = /^(哈+|呵+|嘿+|h+a+h*[ah]*|lol+|lmao|xd+|笑死了?|笑哭)$/i;
+
+/** A short reply ("可以", "好的", "yes") to a bot message that ended with a question. */
+function answersBotQuestion(message: TgMessage, replied: TgMessage): boolean {
+  if (message.sticker) return false;
+  const words = (message.text ?? "").replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\u200d\ufe0f\s。，,.~～…！!？?]+/gu, "");
+  if (!words || LAUGHTER.test(words)) return false;
+  const asked = (replied.text ?? replied.caption ?? richMessageText(replied) ?? "").trim();
+  return /[?？]\s*$|(吗|嗎|呢)[。.]?\s*$/.test(asked);
+}
+
 /**
  * Bot called by name at the start of a message: "grok, …", "grok: …", "grok？", "grok 這是…" (CJK right
  * after), or "hey/hi grok …".
@@ -441,8 +453,9 @@ function callsBotByName(text: string): boolean {
  */
 export function isAddressedToBot(message: TgMessage, bot: Bot): boolean {
   const replied = message.reply_to_message;
-  // "哈哈", "6", "谢谢", a sticker: a reaction to the bot's message, not a question.
-  if (replied?.from?.id === bot.id && !isJustReaction(message)) return true;
+  // "哈哈", "6", "谢谢", a sticker: a reaction to the bot's message, not a question. But "可以" / "好的" / "yes"
+  // under "要我查一下吗？" answers the bot's question.
+  if (replied?.from?.id === bot.id && (!isJustReaction(message) || answersBotQuestion(message, replied))) return true;
   const text = message.text ?? message.caption ?? "";
   const entities = (message.entities ?? message.caption_entities ?? []) as (Entity & { user?: TgUser })[];
   for (const entity of entities) {
@@ -508,7 +521,8 @@ export function buildGroupPrompt(options: {
   speaker: string;
   speakerId?: number;
   text: string;
-  replyTo?: { name: string; text: string; isBot: boolean };
+  /** `chars`: how much of the replied message to quote (default 500). */
+  replyTo?: { name: string; text: string; isBot: boolean; chars?: number };
 }): string {
   const lines: string[] = [];
   if (options.context.length > 0) {
@@ -519,9 +533,13 @@ export function buildGroupPrompt(options: {
   }
   lines.push("[Message addressed to you]");
   const replying = options.replyTo
-    ? ` (replying to ${options.replyTo.isBot ? "you" : options.replyTo.name}: "${truncate(redactSecrets(options.replyTo.text), 500)}")`
+    ? ` (replying to ${options.replyTo.isBot ? "you" : options.replyTo.name}: "${truncate(redactSecrets(options.replyTo.text), options.replyTo.chars ?? 500)}")`
     : "";
-  lines.push(`${options.speaker} [uid:${options.speakerId ?? "?"}]${replying}: ${options.text || "(no text)"}`);
+  // Only "grok": not "nothing was asked". On a reply it means "what about this message?".
+  const bare = options.replyTo
+    ? "(only your name, as a reply: respond to the message they replied to. Answer it if it asks something; otherwise react to it or explain it. Don't ask what they mean.)"
+    : "(only your name, no question: respond to what was just being discussed above, or if nothing fits, ask briefly what they need.)";
+  lines.push(`${options.speaker} [uid:${options.speakerId ?? "?"}]${replying}: ${options.text || bare}`);
   return lines.join("\n");
 }
 

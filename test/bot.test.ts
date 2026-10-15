@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { sessionKey } from "../src/telegram/bot.ts";
+import { SentStore } from "../src/agent/sent.ts";
+import { CONTINUED_WINDOW, PERSONAL_WINDOW, personalKey, SHARED_WINDOW } from "../src/telegram/conversations.ts";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -76,6 +78,7 @@ function harness(
   const cards = new Map<string, { card: unknown }>();
   const runs: { key: string; ephemeral?: boolean; history?: { turns: number; maxAgeMs: number }; text: string; images: number }[] = [];
   const sessions = {
+    sent: new SentStore(db),
     forgetChat: () => 0,
     reset: () => undefined,
     abort: () => false,
@@ -257,12 +260,16 @@ test("focused groups: a question goes without the group chat and keeps a short h
   await h.bot.handleUpdate(h.groupText(6, "grok 三星的自定义插件叫什么？"));
   await h.waitFor(() => h.runs.length === 1);
   assert.doesNotMatch(h.runs[0]!.text, /阳明山/, "no background chat");
-  assert.equal(h.runs[0]!.key, sessionKey(GROUP, 0), "the group's conversation, for follow-ups");
+  assert.equal(h.runs[0]!.key, personalKey(GROUP, 0, 6), "the asker's own conversation, for follow-ups");
   assert.notEqual(h.runs[0]!.ephemeral, true);
   await h.bot.handleUpdate(h.groupText(6, "grok tldr"));
   await h.waitFor(() => h.runs.length === 2);
   assert.match(h.runs[1]!.text, /阳明山/, "asked about the chat: it's there");
   assert.equal(h.runs[1]!.ephemeral, true, "and that turn isn't kept");
+  await h.bot.handleUpdate(h.groupText(6, "grok"));
+  await h.waitFor(() => h.runs.length === 3);
+  assert.match(h.runs[2]!.text, /阳明山/, "just “grok”: about what was being said");
+  assert.equal(h.runs[2]!.ephemeral, true);
 });
 
 test("the group's shared conversation keeps the day's last questions; /forget clears chat data but keeps saved requests", async () => {
@@ -778,18 +785,35 @@ test("private /tr and /remind count against the question limit like questions do
   assert.equal(h.asked.length, 1);
 });
 
-test("strict groups answer in a throwaway conversation; normal groups keep one", async () => {
-  const h = harness({ loggedIn: true });
+test("strict groups keep each person's follow-ups apart; a reply to an answer continues that answer's conversation with its full text", async () => {
+  const long = `第一点：${"细节".repeat(300)}`;
+  const h = harness({ loggedIn: true, distinctIds: true, agent: async (_images, key) => (key.endsWith(":u:5") ? long : "ok") });
   h.groups.enable(GROUP, "Grok bot test"); // new groups start strict
-  await h.bot.handleUpdate(h.groupText(5, "grok, strict question"));
+  const question = h.groupText(5, "grok, 第一个问题");
+  await h.bot.handleUpdate(question);
+  await h.waitFor(() => h.runs.length === 1);
   await h.settle();
+  await h.bot.handleUpdate(h.groupText(6, "grok, 别的问题"));
+  await h.waitFor(() => h.runs.length === 2);
+  await h.settle();
+  const answerId = h.calls.find((c) => c.method === "sendMessage" && (c.payload.reply_parameters as { message_id?: number } | undefined)?.message_id === question.message!.message_id)!.sentId!;
+  // Telegram gives a reply only the start of the replied message; the rest comes from the bot's own record.
+  const replied = { message_id: answerId, date: 0, chat: { id: GROUP, type: "supergroup" }, from: { id: 999, is_bot: true, first_name: "Grokky" }, text: long.slice(0, 50) };
+  await h.bot.handleUpdate(h.groupText(6, "第二点展开说说", { reply_to_message: replied }));
+  await h.waitFor(() => h.runs.length === 3);
   h.groups.setPrivacy(GROUP, "normal");
   await h.bot.handleUpdate(h.groupText(5, "grok, normal question"));
-  await h.settle();
-  assert.deepEqual(h.runs.map((r) => [r.key.replace(/:q\d+$/, ":q"), r.ephemeral]), [
-    [`tg:${GROUP}:q`, true],
-    [`tg:${GROUP}`, false],
-  ]);
+  await h.waitFor(() => h.runs.length === 4);
+  assert.deepEqual(
+    h.runs.map((r) => [r.key, r.ephemeral ?? false, r.history]),
+    [
+      [personalKey(GROUP, 0, 5), false, PERSONAL_WINDOW],
+      [personalKey(GROUP, 0, 6), false, PERSONAL_WINDOW],
+      [personalKey(GROUP, 0, 5), false, CONTINUED_WINDOW],
+      [sessionKey(GROUP, 0), false, SHARED_WINDOW],
+    ],
+  );
+  assert.ok(h.runs[2]!.text.includes(long.slice(0, 300)), "the answer's text beyond what Telegram included");
 });
 
 test("blocked people are ignored everywhere; approved-only groups ignore members who aren't approved", async () => {

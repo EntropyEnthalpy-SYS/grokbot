@@ -17,6 +17,11 @@ test("addressed by @mention (exact username, any case), text mention, or reply t
   assert.equal(isAddressedToBot(msg({ text: "how so?", reply_to_message: msg({ message_id: 0, from: { id: 999, first_name: "T" } }) }), bot), true);
   assert.equal(isAddressedToBot(msg({ text: "how so?", reply_to_message: msg({ message_id: 0, from: { id: 2, first_name: "Bob" } }) }), bot), false);
   assert.equal(isAddressedToBot(msg({ text: "ok", reply_to_message: msg({ message_id: 0, from: { id: 999, first_name: "T" } }) }), bot), false, "a reaction to the bot");
+  const asked = msg({ message_id: 0, from: { id: 999, first_name: "T" }, text: "要我查一下最新价格吗？" });
+  assert.equal(isAddressedToBot(msg({ text: "可以", reply_to_message: asked }), bot), true, "answers the bot's question");
+  assert.equal(isAddressedToBot(msg({ text: "ok 👍", reply_to_message: asked }), bot), true);
+  assert.equal(isAddressedToBot(msg({ text: "哈哈哈", reply_to_message: asked }), bot), false, "laughter stays a reaction");
+  assert.equal(isAddressedToBot(msg({ sticker: { emoji: "👍" } as never, reply_to_message: asked }), bot), false, "so does a sticker");
 });
 
 test("addressed by name only at the start of a message", () => {
@@ -119,6 +124,10 @@ test("the group prompt separates context from the message addressed to the bot",
       'Amy [uid:1] (replying to Bob: "https://e.com/a"): is this true?',
     ].join("\n"),
   );
+  // A bare "grok" on someone's message asks about that message; it isn't an empty question.
+  const bare = buildGroupPrompt({ context: [], speaker: "Amy", text: "", replyTo: { name: "Bob", text: "找几个好兄弟帮我抢duo", isBot: false } });
+  assert.match(bare, /replying to Bob: "找几个好兄弟帮我抢duo"\): \(only your name, as a reply: respond to the message they replied to/);
+  assert.doesNotMatch(bare, /no text/);
 });
 
 test("DEFAULT_LANGUAGE applies to newly enabled groups; existing groups keep theirs", async () => {

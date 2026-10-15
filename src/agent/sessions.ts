@@ -2,9 +2,20 @@ import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@eare
 import type { AssistantMessage, ImageContent, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { Db } from "../db.ts";
 import { isServerSideToolCall, serverSearchStarted, stripServerSideToolCalls, type Grok } from "../grok/grok.ts";
+import { SentStore } from "./sent.ts";
 
 /** Messages sent to Grok per request; older ones stay stored but are not sent. */
 export const CONTEXT_MESSAGES = 60;
+/**
+ * Characters of history sent per request (about 15k tokens). Older turns go first; documents, pages
+ * and transcripts in turns before the latest are cut to their start and end, since the answer that
+ * used them is in the history too.
+ */
+export const CONTEXT_CHARS = 60_000;
+/** Text blocks longer than this in earlier turns are shortened to SHORTENED_HEAD + SHORTENED_TAIL. */
+const LONG_BLOCK_CHARS = 6_000;
+const SHORTENED_HEAD = 2_500;
+const SHORTENED_TAIL = 1_000;
 /** Messages kept in the database per chat. */
 export const STORED_MESSAGES = 200;
 /** Turns older than this are dropped from conversations, even while the chat stays active. */
@@ -18,7 +29,7 @@ export interface TurnInput {
 export interface TurnOptions {
   /** Strict privacy: start with no history, never read or write the database, forget the turn afterwards. */
   ephemeral?: boolean;
-  /** Focused privacy: keep only the last few questions and answers, and none older than this. */
+  /** Send only the last few questions and answers, none older than this (the stored conversation keeps the rest). */
   history?: { turns: number; maxAgeMs: number };
 }
 
@@ -43,6 +54,8 @@ export interface TurnHandlers {
  * at a time; different chats run concurrently.
  */
 export class ChatSessions {
+  /** The bot's own messages and the conversation behind each answer (see SentStore). */
+  readonly sent: SentStore;
   readonly #db: Db;
   readonly #grok: Grok;
   readonly #systemPrompt: (chatKey: string) => string;
@@ -50,9 +63,15 @@ export class ChatSessions {
   readonly #systemExtra: (chatKey: string) => string;
   readonly #retentionMs: number;
   readonly #agents = new Map<string, Agent>();
-  /** The running turn of each chat, told when Grok starts one of its own searches. */
-  readonly #onSearch = new Map<string, (name: string) => void>();
+  /**
+   * The running turn of each chat, told when Grok starts one of its own searches and how much of the
+   * reply's text came before it (`undefined` name: a new reply started). Counted in the raw stream,
+   * which runs ahead of the agent's events.
+   */
+  readonly #onSearch = new Map<string, (name: string | undefined, textBefore: number) => void>();
   readonly #queues = new Map<string, Promise<unknown>>();
+  /** How much of each conversation the current turn sends (TurnOptions.history). */
+  readonly #windows = new Map<string, { turns: number; maxAgeMs: number }>();
   /**
    * Bumped by reset() while turns are queued, so turns queued before a reset don't start and
    * recreate the history. Only kept while the chat has queued turns.
@@ -69,6 +88,7 @@ export class ChatSessions {
     retentionMs?: number;
   }) {
     this.#db = options.db;
+    this.sent = new SentStore(options.db);
     this.#grok = options.grok;
     this.#systemPrompt = options.systemPrompt;
     this.#tools = options.tools ?? (() => []);
@@ -115,11 +135,13 @@ export class ChatSessions {
     for (const agent of this.#agents.values()) {
       if (!agent.state.isStreaming) agent.state.messages = dropExpired(agent.state.messages, cutoff);
     }
+    this.sent.prune(now);
     return deleted;
   }
 
-  /** Delete every conversation of a chat (all forum topics), and cancel its queued turns. */
+  /** Delete every conversation of a chat (all forum topics) and the bot's messages there, and cancel its queued turns. */
   forgetChat(chatId: number): number {
+    this.sent.forget(chatId);
     const keys = this.#db
       .prepare("SELECT chat_key FROM chats WHERE chat_key = ? OR chat_key LIKE ?")
       .all(`tg:${chatId}`, `tg:${chatId}:%`) as { chat_key: string }[];
@@ -134,6 +156,7 @@ export class ChatSessions {
     if (this.#queues.has(chatKey)) this.#generations.set(chatKey, this.#generation(chatKey) + 1);
     this.#agents.get(chatKey)?.abort();
     this.#agents.delete(chatKey);
+    this.#windows.delete(chatKey);
     this.#db.prepare("DELETE FROM chats WHERE chat_key = ?").run(chatKey);
   }
 
@@ -174,14 +197,18 @@ export class ChatSessions {
     // Pick up /model and /route changes made since the agent was created.
     agent.state.model = this.#grok.model();
     agent.state.messages = dropOldImages(dropExpired(agent.state.messages, Date.now() - this.#retentionMs));
-    if (options.history) {
-      const { turns, maxAgeMs } = options.history;
-      agent.state.messages = lastTurns(dropExpired(agent.state.messages, Date.now() - maxAgeMs), turns);
-    }
+    // Only what is sent is limited; the stored conversation keeps older turns for replies to old answers.
+    if (options.history) this.#windows.set(chatKey, options.history);
+    else this.#windows.delete(chatKey);
 
     let text = "";
+    // Where Grok's last own search started in the current reply: text before it ("先查一下…", a first
+    // draft) was written before the search results and doesn't belong in the answer.
+    let searchCut = 0;
     const toolsUsed = new Set<string>();
-    const onSearch = (name: string) => {
+    const onSearch = (name: string | undefined, textBefore: number) => {
+      searchCut = textBefore;
+      if (name === undefined) return;
       toolsUsed.add(LOOKED_UP);
       handlers.onActivity?.(name);
     };
@@ -207,8 +234,16 @@ export class ChatSessions {
         handlers.onTool?.(event.toolName);
       }
     });
+    let reply: AssistantMessage | undefined;
+    const afterLastSearch = () => {
+      const last = lastAssistant(agent.state.messages);
+      if (!last || searchCut === 0 || assistantText(last) !== text) return;
+      const kept = text.slice(searchCut).trim();
+      if (kept) agent.state.messages = agent.state.messages.map((m) => (m === last ? withText(last, kept) : m));
+    };
     try {
       await agent.prompt(input.text, input.images);
+      afterLastSearch();
       // The model is asked once more when its reply isn't a real answer:
       // - "我查一下。" and nothing else, or no text at all: the bot can't send a second message later;
       //   a turn whose tools did the work (a poll posted, an image made) may end without text, though;
@@ -219,6 +254,7 @@ export class ChatSessions {
       const claim = unfinished ? undefined : falseClaim(firstText, toolsUsed);
       if (first?.stopReason === "stop" && (unfinished || claim)) {
         await agent.prompt(claim ? claim.note : FINISH_NOW);
+        afterLastSearch();
         // Keep the conversation as question → answer: the promise and the note go, the question's photos stay the latest.
         const promiseAt = agent.state.messages.indexOf(first);
         if (lastAssistant(agent.state.messages)?.stopReason === "stop" && agent.state.messages[promiseAt + 1]?.role === "user") {
@@ -226,6 +262,8 @@ export class ChatSessions {
         }
       }
     } finally {
+      // The reply as it happened (an error stays an error for the caller), before the history is tidied.
+      reply = lastAssistant(agent.state.messages);
       unsubscribe();
       if (this.#onSearch.get(chatKey) === onSearch) this.#onSearch.delete(chatKey);
       // reset() (/new, /forget, /privacy strict) removed this agent mid-turn: don't write the history back.
@@ -233,16 +271,17 @@ export class ChatSessions {
       if (ephemeral) {
         if (this.#agents.get(chatKey) === agent) this.#agents.delete(chatKey);
       } else if (current) {
-        agent.state.messages = forgetTransient(agent.state.messages);
+        agent.state.messages = keepWhatWasSeen(forgetTransient(agent.state.messages), text);
         this.#save(chatKey, agent.state.messages);
       }
     }
-    const reply = lastAssistant(agent.state.messages);
     if (!reply) throw new Error("Grok returned no reply");
     return reply;
   }
 
   #newAgent(chatKey: string, messages: AgentMessage[]): Agent {
+    // The current response's text so far, from the raw stream (one chat's turns run one at a time).
+    let rawText = "";
     const agent = new Agent({
       initialState: {
         systemPrompt: this.#systemPrompt(chatKey),
@@ -256,12 +295,18 @@ export class ChatSessions {
         this.#grok.streamFn(model, context, {
           ...options,
           onProviderStreamEvent: (event, eventModel) => {
+            rawText = rawTextAfter(rawText, event);
+            if ((event as { type?: unknown } | undefined)?.type === "response.created") this.#onSearch.get(chatKey)?.(undefined, 0);
             const search = serverSearchStarted(event);
-            if (search) this.#onSearch.get(chatKey)?.(search);
+            if (search) this.#onSearch.get(chatKey)?.(search, rawText.length);
             return options?.onProviderStreamEvent?.(event, eventModel);
           },
         }),
-      transformContext: async (messages) => withSystemExtra(trimContext(messages, CONTEXT_MESSAGES), this.#systemExtra(chatKey)),
+      transformContext: async (messages) => {
+        const window = this.#windows.get(chatKey);
+        const recent = window ? lastTurns(dropExpired(messages, Date.now() - window.maxAgeMs), window.turns) : messages;
+        return withSystemExtra(fitBudget(trimContext(recent, CONTEXT_MESSAGES), CONTEXT_CHARS), this.#systemExtra(chatKey));
+      },
       sessionId: chatKey,
     });
     this.#agents.set(chatKey, agent);
@@ -290,6 +335,13 @@ export class ChatSessions {
   }
 }
 
+/** The text of the current Responses API reply after a raw stream event (a new response starts empty). */
+function rawTextAfter(text: string, event: unknown): string {
+  const { type, delta } = (event ?? {}) as { type?: unknown; delta?: unknown };
+  if (type === "response.created") return "";
+  return type === "response.output_text.delta" && typeof delta === "string" ? text + delta : text;
+}
+
 /** Add text to the leading system message of a request (a copy; the stored transcript is untouched). */
 export function withSystemExtra(messages: AgentMessage[], extra: string): AgentMessage[] {
   if (!extra || messages[0]?.role !== "system") return messages;
@@ -311,6 +363,91 @@ export function trimContext(messages: readonly AgentMessage[], limit: number): A
   let start = rest.length - limit;
   while (start < rest.length && rest[start]?.role !== "user") start++;
   return [...system, ...rest.slice(start)];
+}
+
+/**
+ * Keep a request's history under `budget` characters: text in turns before the latest is shortened
+ * to its start and end (a document, page or transcript the answer already used), then the oldest
+ * turns go. The latest turn is always sent whole.
+ */
+export function fitBudget(messages: readonly AgentMessage[], budget: number): AgentMessage[] {
+  let head = 0;
+  while (head < messages.length && messages[head]?.role === "system") head++;
+  let latest = messages.length;
+  for (let i = messages.length - 1; i >= head; i--) {
+    if (messages[i]?.role === "user") {
+      latest = i;
+      break;
+    }
+  }
+  const result = messages.map((message, i) => (i >= head && i < latest ? shortened(message) : message));
+  let total = result.slice(head).reduce((sum, message) => sum + messageChars(message), 0);
+  let start = head;
+  while (total > budget && start < latest) {
+    // Drop one whole turn: from this user message up to the next one.
+    let end = start + 1;
+    while (end < latest && result[end]?.role !== "user") end++;
+    for (let i = start; i < end; i++) total -= messageChars(result[i]!);
+    start = end;
+  }
+  return [...result.slice(0, head), ...result.slice(start)];
+}
+
+function messageChars(message: AgentMessage): number {
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") return content.length;
+  if (!Array.isArray(content)) return 0;
+  let chars = 0;
+  for (const block of content as { type: string; text?: string; thinking?: string; arguments?: unknown }[]) {
+    if (block.type === "text") chars += block.text?.length ?? 0;
+    else if (block.type === "thinking") chars += block.thinking?.length ?? 0;
+    else if (block.type === "toolCall") chars += JSON.stringify(block.arguments ?? {}).length;
+    else if (block.type === "image") chars += 1_000;
+  }
+  return chars;
+}
+
+function shorten(text: string): string {
+  if (text.length <= LONG_BLOCK_CHARS) return text;
+  const cut = text.length - SHORTENED_HEAD - SHORTENED_TAIL;
+  return `${text.slice(0, SHORTENED_HEAD)}\n[… ${cut} characters left out of this earlier message …]\n${text.slice(-SHORTENED_TAIL)}`;
+}
+
+function shortened(message: AgentMessage): AgentMessage {
+  if (message.role !== "user" && message.role !== "toolResult") return message;
+  const content = (message as { content: unknown }).content;
+  if (typeof content === "string") return content.length > LONG_BLOCK_CHARS ? ({ ...message, content: shorten(content) } as AgentMessage) : message;
+  if (!Array.isArray(content) || !content.some((b) => b.type === "text" && b.text.length > LONG_BLOCK_CHARS)) return message;
+  return { ...message, content: content.map((b) => (b.type === "text" ? { ...b, text: shorten(b.text) } : b)) } as AgentMessage;
+}
+
+/** An assistant message with its text replaced (thinking and tool calls stay). */
+function withText(message: AssistantMessage, text: string): AssistantMessage {
+  const content: AssistantMessage["content"] = [];
+  let placed = false;
+  for (const block of message.content) {
+    if (block.type !== "text") content.push(block);
+    else if (!placed) {
+      content.push({ ...block, text });
+      placed = true;
+    }
+  }
+  return { ...message, content };
+}
+
+/**
+ * A failed or stopped reply is skipped when the history is sent again, so the model would never know
+ * what the person saw (and the next question would follow theirs with no answer between). It becomes
+ * the text that was shown, marked unfinished.
+ */
+export function keepWhatWasSeen(messages: readonly AgentMessage[], shownText: string): AgentMessage[] {
+  const last = messages.at(-1) as AssistantMessage | undefined;
+  if (last?.role !== "assistant" || (last.stopReason !== "error" && last.stopReason !== "aborted")) return [...messages];
+  const how = last.stopReason === "aborted" ? "stopped" : "failed";
+  const shown = shownText.trim();
+  const text = shown ? `${shown}\n\n(this answer ${how} before it was finished)` : `(no answer: it ${how})`;
+  const kept: AssistantMessage = { ...last, content: [{ type: "text", text }], stopReason: "stop", errorMessage: undefined };
+  return [...messages.slice(0, -1), kept];
 }
 
 /** Tools whose results serve one answer only (the group chat): later questions see a placeholder instead. */
