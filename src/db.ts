@@ -163,6 +163,8 @@ export function openDbAt(path: string): Db {
   addColumnIfMissing(db, "groups", "voice_reply", "INTEGER NOT NULL DEFAULT 1");
   // /schedule: the bot writes the post itself (weather, news…) instead of repeating a fixed reminder text.
   addColumnIfMissing(db, "reminders", "ai", "INTEGER NOT NULL DEFAULT 0");
+  // A note about one person (saved in their private chat's list): used whenever they ask, in any chat.
+  addColumnIfMissing(db, "group_memory", "personal", "INTEGER NOT NULL DEFAULT 0");
   // Who may use the bot in a group: everyone (default) or approved members only.
   addColumnIfMissing(db, "groups", "access", "TEXT NOT NULL DEFAULT 'everyone'");
   // /tz: the group's time zone ("" = the bot's TIMEZONE).

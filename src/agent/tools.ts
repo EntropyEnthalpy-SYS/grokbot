@@ -151,3 +151,30 @@ export function groupChatTool(groups: GroupStore, chatId: number, threadId: numb
     },
   };
 }
+
+/**
+ * Past messages of this group that mention something ("那家餐厅叫什么", "what did you say about the
+ * M5 last week"): only the matching messages are sent, secrets hidden, and not kept afterwards
+ * (TRANSIENT_TOOLS). Not in strict groups, which keep no group chat and keep each person's answers apart.
+ */
+export function searchChatTool(groups: GroupStore, chatId: number, zone: () => string): AgentTool<ReturnType<typeof Type.Object>, undefined> {
+  return {
+    name: "search_chat",
+    label: "Searching the chat",
+    description:
+      "Search this group's earlier messages (people's and yours, up to 7 days) for words. Use it when a question refers " +
+      "to something said here before that isn't in the conversation (\"那家餐厅叫什么\", \"what did you say about X yesterday\"). " +
+      "Give a few short keywords as they would have been written, including other spellings or languages (e.g. 餐厅 餐廳 restaurant).",
+    parameters: Type.Object({ keywords: Type.Array(Type.String(), { description: "1–6 short keywords; a message matching any is returned" }) }),
+    execute: async (_id, params) => {
+      const { keywords } = params as { keywords: string[] };
+      const found = groups.searchHistory(chatId, keywords);
+      const time = new Intl.DateTimeFormat("en-CA", { timeZone: zone(), month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+      const lines = found
+        .sort((a, b) => a.at - b.at)
+        .map((e) => `[${time.format(e.at)}${e.threadId ? ` topic ${e.threadId}` : ""}] ${e.isBot ? "you" : e.name}: ${redactSecrets(e.text.length > 600 ? `${e.text.slice(0, 600)}…` : e.text)}`);
+      const text = lines.length ? untrusted("chat search", lines.join("\n")) : `(nothing found for: ${keywords.join(", ")})`;
+      return { content: [{ type: "text", text }], details: undefined };
+    },
+  };
+}

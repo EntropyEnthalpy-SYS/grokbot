@@ -15,7 +15,7 @@ import { installAdmin, renderHealth } from "./admin.ts";
 import { MEMBER_HELP, OWNER_HELP } from "./guide.ts";
 import { addLocalDays, findTimeZone, formatFromNow, formatLocalTime as formatInZone, timeZone, zoneLabel } from "../time.ts";
 import { InputFile as VoiceFile } from "grammy";
-import { MAX_FACTS_PER_CHAT, type MemoryStore } from "../memory.ts";
+import { MAX_FACTS_PER_CHAT, MAX_PERSONAL_FACTS, type MemoryStore } from "../memory.ts";
 import type { Message, Update } from "grammy/types";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { TurnCancelledError, type ChatSessions } from "../agent/sessions.ts";
@@ -636,7 +636,7 @@ export function createBot({
     const verb = first.toLowerCase();
     if (!args || verb === "list") {
       const facts = memory.list(chatId);
-      const lines = facts.map((f) => `<code>${f.id}</code> ${escapeHtml(f.text)} <i>— ${escapeHtml(f.userName)}</i>`);
+      const lines = facts.map((f) => `<code>${f.id}</code> ${f.personal ? "👤 " : ""}${escapeHtml(f.text)} <i>— ${escapeHtml(f.userName)}</i>`);
       return ctx.reply(
         [
           facts.length ? `📝 Notes I always remember here (${facts.length}/${MAX_FACTS_PER_CHAT}):` : "📝 No notes yet.",
@@ -644,12 +644,28 @@ export function createBot({
           "",
           "Add: <code>/lm add 小明吃素</code> or say “grok, 記住小明吃素”",
           "Delete: <code>/lm del &lt;id&gt;</code> (the person who added it, or the owner)",
+          isGroup(ctx) ? "👤 Notes about yourself (“grok, 記住我吃素”), used wherever you ask: <code>/lm me</code>" : "👤 = about you: also used when you ask me in groups.",
+        ].join("\n"),
+        { parse_mode: "HTML" },
+      );
+    }
+    if (verb === "me") {
+      const own = ctx.from ? memory.personal(ctx.from.id) : [];
+      const lines = own.map((f) => `<code>${f.id}</code> ${escapeHtml(f.text)}`);
+      return ctx.reply(
+        [
+          own.length ? `👤 Notes about you, used whenever you ask me (${own.length}/${MAX_PERSONAL_FACTS}):` : "👤 No notes about you yet.",
+          ...lines,
+          "",
+          "Add: say “grok, 記住我吃素” · Delete: <code>/lm del &lt;id&gt;</code>",
         ].join("\n"),
         { parse_mode: "HTML" },
       );
     }
     if (["del", "delete", "rm", "remove"].includes(verb)) {
-      const fact = memory.get(chatId, Number(rest[0]?.replace(/^#/, "")));
+      const id = Number(rest[0]?.replace(/^#/, ""));
+      // The sender's notes about themselves can be deleted from any chat.
+      const fact = memory.get(chatId, id) ?? (ctx.from ? memory.personal(ctx.from.id).find((f) => f.id === id) : undefined);
       if (!fact) return ctx.reply("No such note here. /lm lists them with their ids.");
       if (!isOwner(ctx) && fact.userId !== ctx.from?.id) return ctx.reply("Only the person who added it (or the bot owner) can delete it.");
       memory.remove(fact.id);

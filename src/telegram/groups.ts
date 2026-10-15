@@ -331,6 +331,38 @@ export class GroupStore {
     return picked.reverse();
   }
 
+  /**
+   * Past messages of this chat (all topics) containing any of `terms`, the bot's own included: those
+   * matching the most terms first, then the newest. The group log keeps 7 days (1 day when focused).
+   */
+  searchHistory(chatId: number, terms: readonly string[], limit = 12): (LogEntry & { threadId: number })[] {
+    const words = [...new Set(terms.map((t) => t.trim().toLowerCase()).filter(Boolean))].slice(0, 6);
+    if (words.length === 0) return [];
+    const like = words.map(() => "lower(text) LIKE ? ESCAPE '\\'").join(" OR ");
+    const patterns = words.map((w) => `%${w.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+    const rows = this.#db
+      .prepare(
+        `SELECT thread_id, message_id, user_id, name, text, is_bot, at FROM group_log WHERE chat_id = ? AND (${like}) ` +
+          `UNION ALL SELECT 0, message_id, NULL, 'bot', text, 1, at FROM sent_messages WHERE chat_id = ? AND (${like}) ` +
+          "AND message_id NOT IN (SELECT message_id FROM group_log WHERE chat_id = ?) ORDER BY at DESC LIMIT 200",
+      )
+      .all(chatId, ...patterns, chatId, ...patterns, chatId) as {
+      thread_id: number;
+      message_id: number;
+      user_id: number | null;
+      name: string;
+      text: string;
+      is_bot: number;
+      at: number;
+    }[];
+    const hits = (text: string) => words.filter((w) => text.toLowerCase().includes(w)).length;
+    return rows
+      .map((r, order) => ({ r, order, score: hits(r.text) }))
+      .sort((a, b) => b.score - a.score || a.order - b.order)
+      .slice(0, limit)
+      .map(({ r }) => ({ threadId: Number(r.thread_id), messageId: Number(r.message_id), userId: r.user_id ?? undefined, name: r.name, text: r.text, isBot: r.is_bot === 1, at: Number(r.at) }));
+  }
+
   /** What was logged for a message, e.g. the full card text and link behind one photo of the bot's album. */
   loggedText(chatId: number, messageId: number): string | undefined {
     const row = this.#db.prepare("SELECT text FROM group_log WHERE chat_id = ? AND message_id = ?").get(chatId, messageId) as

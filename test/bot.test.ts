@@ -520,15 +520,29 @@ test("“grok, 記住…”: the remember tool saves the note under the person w
       const tool = memory.tool(GROUP, () => speakers.get(key));
       const result = await tool.execute("c1", { note: "小美對花生過敏" });
       assert.equal(result.isError, undefined);
+      // "記住我吃素": about the asker, so it goes with them to every chat.
+      assert.equal((await tool.execute("c2", { note: "我吃素", about: "asker" })).isError, undefined);
       return "記住了";
     },
   });
   h.groups.enable(GROUP, "Grok bot test");
-  await h.bot.handleUpdate(h.groupText(7, "grok, 記住小美對花生過敏"));
+  h.memory.add(7, "my private reminder", { userId: 7, userName: "user7" }); // a plain note in their private chat
+  await h.bot.handleUpdate(h.groupText(7, "grok, 記住小美對花生過敏，還有我吃素"));
   await h.settle();
   const [fact] = h.memory.list(GROUP);
   assert.deepEqual([fact?.text, fact?.userId, fact?.userName], ["小美對花生過敏", 7, "user7"]);
+  assert.equal(h.memory.list(GROUP).length, 1, "the personal note isn't in the group's list");
   assert.equal(h.speakers.size, 0, "the speaker is cleared after the answer");
+  const asked7 = h.memory.promptBlock(GROUP, { userId: 7, userName: "user7" });
+  assert.match(asked7, /小美對花生過敏[\s\S]*About user7, who is asking now[\s\S]*我吃素/);
+  assert.doesNotMatch(asked7, /my private reminder/, "plain private-chat notes stay private");
+  assert.doesNotMatch(h.memory.promptBlock(GROUP, { userId: 8, userName: "user8" }), /我吃素/, "not when someone else asks");
+  assert.match(h.memory.promptBlock(7, { userId: 7, userName: "user7" }), /我吃素[\s\S]*/, "in their private chat it is one of the chat's notes");
+  await h.bot.handleUpdate(h.groupText(7, "/lm me"));
+  await h.until((c) => c.method === "sendMessage" && String(c.payload.text).includes("我吃素"));
+  const id = h.memory.personal(7)[0]!.id;
+  await h.bot.handleUpdate(h.groupText(7, `/lm del ${id}`));
+  await h.waitFor(() => h.memory.personal(7).length === 0);
 });
 
 test("/tidy deletes setting commands and replies after 2 minutes; /tr and /disable-tidy groups are left alone", async () => {

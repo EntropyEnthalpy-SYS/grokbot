@@ -482,7 +482,7 @@ export function keepWhatWasSeen(messages: readonly AgentMessage[], shownText: st
 }
 
 /** Tools whose results serve one answer only (the group chat): later questions see a placeholder instead. */
-export const TRANSIENT_TOOLS = new Set(["read_group_chat"]);
+export const TRANSIENT_TOOLS = new Set(["read_group_chat", "search_chat"]);
 
 export function forgetTransient(messages: readonly AgentMessage[]): AgentMessage[] {
   return messages.map((m) =>
@@ -576,7 +576,7 @@ const LOOKED_UP = "lookup";
 /** Grok's server-side tools (web_search, x_keyword_search, browse_page…). */
 const SEARCHES = /search|browse|^x_/i;
 /** Our tools that look things up. */
-const LOOKUP_TOOLS = new Set(["search_web", "read_link", "watch_video", "read_group_chat"]);
+const LOOKUP_TOOLS = new Set(["search_web", "read_link", "watch_video", "read_group_chat", "search_chat"]);
 /** "官网", "官方标价", "according to the official site". */
 const OFFICIAL = /官網|官网|官方(標價|标价|價格|价格|定價|定价|公布|說明|说明|文檔|文档|資料|资料)|\b(according to (the )?official|official (site|website|pricing|price|docs))\b/i;
 /** A price with a period or a plan: "$25/月", "每月 $5", "40刀套餐", "$10 per month". */

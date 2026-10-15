@@ -1,6 +1,6 @@
 import { ChatSessions } from "./agent/sessions.ts";
 import { FileDesk } from "./agent/files.ts";
-import { groupChatTool, readLinkTool, watchVideoTool } from "./agent/tools.ts";
+import { groupChatTool, readLinkTool, searchChatTool, watchVideoTool } from "./agent/tools.ts";
 import { ImageStudio } from "./agent/images.ts";
 import { MemoryStore } from "./memory.ts";
 import { PollDesk } from "./agent/polls.ts";
@@ -110,9 +110,11 @@ export function createApp(options: {
       ...(search.available ? [searchWebTool(search)] : []),
       // Focused groups: the chat only when Grok decides a question needs it.
       ...(groups.privacy(chatIdOf(key)) === "focused" ? [groupChatTool(groups, chatIdOf(key), threadOf(key), () => groups.list().find((g) => g.chatId === chatIdOf(key))?.title)] : []),
+      // Groups that keep their chat: earlier messages on request, only the matching ones.
+      ...(chatIdOf(key) < 0 && groups.privacy(chatIdOf(key)) !== "strict" ? [searchChatTool(groups, chatIdOf(key), () => groups.timeZone(chatIdOf(key)))] : []),
     ],
     systemExtra: (key) =>
-      `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + scriptBlock(groups, chatIdOf(key)) + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key)),
+      `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + scriptBlock(groups, chatIdOf(key)) + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key), speakers.get(key)),
   });
   return { db, grok, sessions, groups, reader, video, parsehub, images, files, memory, speakers, polls, actions, limits };
 }

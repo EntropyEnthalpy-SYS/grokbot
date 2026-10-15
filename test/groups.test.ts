@@ -163,3 +163,24 @@ test("a sticker, emoji or a short reaction word is a reaction; anything with a r
   assert.equal(isJustReaction(m(undefined, { sticker: { emoji: "😂" } })), true);
   assert.equal(isJustReaction(m(undefined, { caption: "哈哈", photo: [{}] })), false, "a photo is content");
 });
+
+test("chat search: messages matching more keywords first, then newest; only this chat; % and _ are plain text", () => {
+  const db = openDbAt(":memory:");
+  const groups = new GroupStore(db);
+  const now = Date.now();
+  const log = (chat: number, id: number, text: string, at: number, isBot = false) => groups.log(chat, 0, { messageId: id, name: `p${id}`, text, isBot, at });
+  log(-1, 1, "周六去那家日料餐厅吧", now - 5000);
+  log(-1, 2, "餐廳叫 Sushi Ko，在信义区", now - 4000);
+  log(-1, 3, "The restaurant is fully booked", now - 3000);
+  log(-1, 4, "折扣 100% 真的假的", now - 2000);
+  log(-1, 5, "100 块就够了", now - 1500);
+  log(-2, 6, "另一个群的餐厅", now - 1000);
+  log(-1, 7, "bot card about 餐厅", now - 900, true);
+  // An answer from before the log was kept (or a strict-era answer): only in the bot's own record.
+  new SentStore(db).record(-1, [8], "上次推荐的餐厅是 Sushi Ko", "tg:-1", now - 800);
+  const ids = (terms: string[]) => groups.searchHistory(-1, terms).map((e) => e.messageId);
+  assert.deepEqual(ids(["餐厅", "sushi ko"]), [8, 7, 2, 1], "8 matches both; the rest one each, newest first");
+  assert.deepEqual(ids(["RESTAURANT", "餐廳"]), [3, 2]);
+  assert.deepEqual(ids(["100%"]), [4]);
+  assert.deepEqual(ids(["  ", ""]), []);
+});
