@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { openDbAt } from "../src/db.ts";
+import { SentStore } from "../src/agent/sent.ts";
 import { buildGroupPrompt, describeMessage, GroupStore, isAddressedToBot, stripAddress, threadIdOf, type TgMessage } from "../src/telegram/groups.ts";
 
 const bot = { id: 999, username: "GrokTest_bot" };
@@ -81,18 +82,22 @@ test("topic messages get their topic id; normal and General-topic messages get 0
   assert.equal(threadIdOf(msg({})), 0);
 });
 
-test("context is what was said since the bot last spoke, per topic, without the trigger", () => {
-  const groups = new GroupStore(openDbAt(":memory:"));
+test("context is what was said since the bot last answered (not since its link cards), per topic, without the trigger", () => {
+  const db = openDbAt(":memory:");
+  const groups = new GroupStore(db);
   const now = 1_000_000_000_000;
   const log = (thread: number, id: number, name: string, text: string, at: number, isBot = false) =>
     groups.log(-100, thread, { messageId: id, userId: id, name, text, isBot, at });
   log(0, 1, "Amy", "before bot", now - 5000);
   log(0, 2, "Tokni", "bot answer", now - 4000, true);
+  new SentStore(db).record(-100, [2], "bot answer", "tg:-100");
   log(0, 3, "Bob", "after bot", now - 3000);
+  log(0, 6, "Tokni", "[content of https://example.com]", now - 2800, true);
+  log(0, 8, "Bob", "after the card", now - 2600);
   log(7, 4, "Cat", "other topic", now - 2500);
   log(0, 5, "Amy", "@bot what do you think?", now - 1000);
   const context = groups.contextSinceLastReply(-100, 0, 5, now);
-  assert.deepEqual(context.map((e) => e.text), ["after bot"]);
+  assert.deepEqual(context.map((e) => e.text), ["after bot", "after the card"]);
   assert.deepEqual(groups.contextSinceLastReply(-100, 7, 99, now).map((e) => e.text), ["other topic"]);
 });
 

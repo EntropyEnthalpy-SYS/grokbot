@@ -1383,8 +1383,9 @@ export function createBot({
 
   function onGroupMessage(ctx: Context, message: Message): void {
     const me = { id: ctx.me.id, username: ctx.me.username };
-    if (message.from?.is_bot) return;
     const chatId = ctx.chat!.id;
+    // Other bots are ignored; an admin posting anonymously also shows as a bot (GroupAnonymousBot), sent as the group itself.
+    if (message.from?.is_bot && message.sender_chat?.id !== chatId) return;
     const threadId = threadIdOf(message);
     // Focused groups keep normal's automatic features (voice transcripts, round videos); only the AI's background differs.
     const normal = groups.privacy(chatId) !== "strict";

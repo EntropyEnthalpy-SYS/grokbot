@@ -582,3 +582,36 @@ test("the history sent stays within its budget: long texts in earlier turns are 
   assert.ok(fitted.some((t) => t.includes("characters left out")), "the remaining earlier long text is shortened");
   assert.deepEqual(fitBudget(messages, 1_000_000).length, messages.length, "under budget: every turn stays");
 });
+
+test("a reply that stops making progress is given up as an error; a slow tool of ours is not a stall", { timeout: 5000 }, async () => {
+  const stuck = gatedGrok();
+  const sessions = new ChatSessions({ db: openDbAt(":memory:"), grok: stuck.grok as never, systemPrompt: () => "", stallMs: 50 });
+  const reply = await sessions.run("tg:-1", { text: "問題" });
+  assert.equal(reply.stopReason, "error");
+  assert.match(reply.errorMessage ?? "", /no response/);
+
+  let requests = 0;
+  const slowTool = {
+    name: "watch_video", label: "video", description: "", parameters: { type: "object", properties: {} },
+    execute: async () => (await new Promise((resolve) => setTimeout(resolve, 200)), { content: [{ type: "text", text: "transcript" }], details: undefined }),
+  };
+  const grok = {
+    model: () => model,
+    streamFn: (_model: unknown, _context: unknown, options?: { signal?: AbortSignal }) => {
+      const first = requests++ === 0;
+      const stream = createAssistantMessageEventStream();
+      const content = first ? [{ type: "toolCall", id: "fc_1", name: "watch_video", arguments: {} }] : [{ type: "text", text: "影片講的是…" }];
+      const message = { role: "assistant", content, api: model.api, provider: model.provider, model: model.id, usage: zero, stopReason: first ? "toolUse" : "stop", timestamp: Date.now() } as unknown as AssistantMessage;
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: { ...message, content: [] } });
+        if (options?.signal?.aborted) stream.push({ type: "error", reason: "aborted", error: { ...message, content: [], stopReason: "aborted" } });
+        else stream.push({ type: "done", reason: message.stopReason as "stop", message });
+      });
+      return stream;
+    },
+  };
+  const patient = new ChatSessions({ db: openDbAt(":memory:"), grok: grok as never, systemPrompt: () => "", tools: () => [slowTool as never], stallMs: 50 });
+  const watched = await patient.run("tg:-2", { text: "這影片講什麼" });
+  assert.equal(watched.stopReason, "stop");
+  assert.equal((watched.content[0] as { text: string }).text, "影片講的是…");
+});

@@ -20,6 +20,12 @@ const SHORTENED_TAIL = 1_000;
 export const STORED_MESSAGES = 200;
 /** Turns older than this are dropped from conversations, even while the chat stays active. */
 export const CONVERSATION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * A reply that makes no progress this long is given up (time in our own tools, such as watching a
+ * long video, doesn't count). Grok's own searches send stream events while they run, so a long
+ * search isn't a stall; a dropped connection that never closes is.
+ */
+export const STALL_MS = 120_000;
 
 export interface TurnInput {
   text: string;
@@ -69,6 +75,9 @@ export class ChatSessions {
    * which runs ahead of the agent's events.
    */
   readonly #onSearch = new Map<string, (name: string | undefined, textBefore: number) => void>();
+  /** The running turn of each chat, told that the raw stream is still alive. */
+  readonly #onStream = new Map<string, () => void>();
+  readonly #stallMs: number;
   readonly #queues = new Map<string, Promise<unknown>>();
   /** How much of each conversation the current turn sends (TurnOptions.history). */
   readonly #windows = new Map<string, { turns: number; maxAgeMs: number }>();
@@ -86,6 +95,7 @@ export class ChatSessions {
     /** Appended to the system prompt on every request (e.g. the chat's saved notes); never stored. */
     systemExtra?: (chatKey: string) => string;
     retentionMs?: number;
+    stallMs?: number;
   }) {
     this.#db = options.db;
     this.sent = new SentStore(options.db);
@@ -94,6 +104,7 @@ export class ChatSessions {
     this.#tools = options.tools ?? (() => []);
     this.#systemExtra = options.systemExtra ?? (() => "");
     this.#retentionMs = options.retentionMs ?? CONVERSATION_RETENTION_MS;
+    this.#stallMs = options.stallMs ?? STALL_MS;
   }
 
   run(chatKey: string, input: TurnInput, handlers: TurnHandlers = {}, options: TurnOptions = {}): Promise<AssistantMessage> {
@@ -194,8 +205,9 @@ export class ChatSessions {
     handlers.onStart?.();
     // Ephemeral agents are registered too, so /stop and reset() can abort them.
     const agent = ephemeral ? this.#newAgent(chatKey, []) : (this.#agents.get(chatKey) ?? this.#newAgent(chatKey, this.#load(chatKey)));
-    // Pick up /model and /route changes made since the agent was created.
+    // Pick up /model, /route and /privacy changes (which tools the chat may use) made since the agent was created.
     agent.state.model = this.#grok.model();
+    agent.state.tools = this.#tools(chatKey);
     agent.state.messages = dropOldImages(dropExpired(agent.state.messages, Date.now() - this.#retentionMs));
     // Only what is sent is limited; the stored conversation keeps older turns for replies to old answers.
     if (options.history) this.#windows.set(chatKey, options.history);
@@ -213,7 +225,20 @@ export class ChatSessions {
       handlers.onActivity?.(name);
     };
     this.#onSearch.set(chatKey, onSearch);
+    // No progress for #stallMs: abort, and report it as an error rather than as a /stop.
+    let stalled = false;
+    let toolsRunning = 0;
+    let stallTimer: NodeJS.Timeout | undefined;
+    const alive = () => {
+      clearTimeout(stallTimer);
+      if (toolsRunning === 0) stallTimer = setTimeout(() => ((stalled = true), agent.abort()), this.#stallMs);
+    };
+    this.#onStream.set(chatKey, alive);
+    alive();
     const unsubscribe = agent.subscribe((event: AgentEvent) => {
+      if (event.type === "tool_execution_start") toolsRunning++;
+      if (event.type === "tool_execution_end") toolsRunning = Math.max(0, toolsRunning - 1);
+      alive();
       if (event.type === "message_start" && event.message.role === "assistant") text = "";
       if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
         text += event.assistantMessageEvent.delta;
@@ -265,7 +290,9 @@ export class ChatSessions {
       // The reply as it happened (an error stays an error for the caller), before the history is tidied.
       reply = lastAssistant(agent.state.messages);
       unsubscribe();
+      clearTimeout(stallTimer);
       if (this.#onSearch.get(chatKey) === onSearch) this.#onSearch.delete(chatKey);
+      if (this.#onStream.get(chatKey) === alive) this.#onStream.delete(chatKey);
       // reset() (/new, /forget, /privacy strict) removed this agent mid-turn: don't write the history back.
       const current = this.#agents.get(chatKey) === agent && generation === this.#generation(chatKey);
       if (ephemeral) {
@@ -276,6 +303,9 @@ export class ChatSessions {
       }
     }
     if (!reply) throw new Error("Grok returned no reply");
+    if (stalled && reply.stopReason === "aborted") {
+      return { ...reply, stopReason: "error", errorMessage: `no response from the AI for ${Math.round(this.#stallMs / 1000)} s (network)` };
+    }
     return reply;
   }
 
@@ -295,6 +325,7 @@ export class ChatSessions {
         this.#grok.streamFn(model, context, {
           ...options,
           onProviderStreamEvent: (event, eventModel) => {
+            this.#onStream.get(chatKey)?.();
             rawText = rawTextAfter(rawText, event);
             if ((event as { type?: unknown } | undefined)?.type === "response.created") this.#onSearch.get(chatKey)?.(undefined, 0);
             const search = serverSearchStarted(event);

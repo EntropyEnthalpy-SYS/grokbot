@@ -877,6 +877,17 @@ test("/topic: Puck opens a topic with the question, the bot answers in it, and f
   assert.ok(h.puckCalls.some((c) => String(c.payload.text).includes("doesn't have Topics")));
 });
 
+test("an admin posting anonymously is answered; other bots are not", async () => {
+  const h = harness({ loggedIn: true });
+  h.groups.enable(GROUP, "Grok bot test");
+  const anonymous = { from: { id: 1087968824, is_bot: true, first_name: "Group", username: "GroupAnonymousBot" }, sender_chat: { id: GROUP, type: "supergroup", title: "Grok bot test" } };
+  await h.bot.handleUpdate(h.groupText(0, "grok, 今天几号", anonymous));
+  await h.waitFor(() => h.runs.length === 1);
+  await h.bot.handleUpdate(h.groupText(0, "grok, 你好", { from: { id: 4242, is_bot: true, first_name: "OtherBot" } }));
+  await h.settle();
+  assert.equal(h.runs.length, 1);
+});
+
 test("blocked people are ignored everywhere; approved-only groups ignore members who aren't approved", async () => {
   const h = harness();
   h.groups.enable(GROUP, "Grok bot test");

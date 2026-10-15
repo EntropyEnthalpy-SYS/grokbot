@@ -293,15 +293,21 @@ export class GroupStore {
   }
 
   /**
-   * Messages in this thread since the bot last spoke (at most CONTEXT_LIMIT,
+   * Messages in this thread since the bot last answered (at most CONTEXT_LIMIT,
    * CONTEXT_CHARS, and one day), oldest first, excluding `excludeMessageId`.
+   * Its link cards and other bots' posts don't count: the chat before them is still unseen.
    */
   contextSinceLastReply(chatId: number, threadId: number, excludeMessageId: number, now = Date.now(), wholeDay = false): LogEntry[] {
-    // `wholeDay`: a question about the chat ("tldr") wants the last messages even if the bot posted cards in between.
-    const lastBot = wholeDay
+    // An answer is a bot message recorded with the conversation that wrote it (SentStore).
+    const lastAnswer = wholeDay
       ? { at: null }
-      : (this.#db.prepare("SELECT MAX(at) AS at FROM group_log WHERE chat_id = ? AND thread_id = ? AND is_bot = 1").get(chatId, threadId) as { at: number | null });
-    const since = Math.max(lastBot.at ?? 0, now - CONTEXT_MAX_AGE_MS);
+      : (this.#db
+          .prepare(
+            "SELECT MAX(g.at) AS at FROM group_log g JOIN sent_messages s ON s.chat_id = g.chat_id AND s.message_id = g.message_id " +
+              "WHERE g.chat_id = ? AND g.thread_id = ? AND s.chat_key IS NOT NULL",
+          )
+          .get(chatId, threadId) as { at: number | null });
+    const since = Math.max(lastAnswer.at ?? 0, now - CONTEXT_MAX_AGE_MS);
     const rows = this.#db
       .prepare(
         "SELECT message_id, user_id, name, text, is_bot, at FROM group_log " +
