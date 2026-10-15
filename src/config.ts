@@ -2,6 +2,8 @@ import { resolve } from "node:path";
 
 export interface Config {
   botToken: string;
+  /** Optional second bot (Puck) that opens forum topics with /topic; the main bot answers in them. */
+  puckToken?: string;
   ownerId: number;
   dataDir: string;
   defaultModel: string;
@@ -40,6 +42,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   return {
     botToken: required(env, "BOT_TOKEN"),
+    puckToken: env.PUCK_TOKEN?.trim() || undefined,
     ownerId,
     dataDir: resolve(env.DATA_DIR?.trim() || "./data"),
     defaultModel: env.GROK_MODEL?.trim() || "grok-4.7",

@@ -1,6 +1,8 @@
 import { bilibiliDownloader, createApp } from "./app.ts";
 import { loadConfig, loadDotEnv } from "./config.ts";
+import { Bot } from "grammy";
 import { createBot, registerCommands, reminderKeyboard, renderReminder } from "./telegram/bot.ts";
+import { registerPuckCommands } from "./telegram/puck.ts";
 import { deliverDueReminders, ReminderStore } from "./reminders.ts";
 import { checkDueWatches, WatchStore } from "./watches.ts";
 import { SkillStore } from "./skills.ts";
@@ -101,7 +103,9 @@ grok.onFailover = (from, to, error) => {
   health.recordError(new Error(`${from} → ${to}: ${error}`));
 };
 
+const puck = config.puckToken ? new Bot(config.puckToken, config.telegramApiRoot ? { client: { apiRoot: config.telegramApiRoot } } : undefined) : undefined;
 const bot = createBot({
+  puck,
   token: config.botToken,
   ownerId: config.ownerId,
   grok,
@@ -205,6 +209,7 @@ const shutdown = async (signal: string) => {
   clearInterval(reminderTimer);
   clearInterval(watchTimer);
   health.stop();
+  await puck?.stop();
   await bot.stop();
   db.close();
   process.exit(0);
@@ -226,6 +231,11 @@ void ops.leftovers().then(async (results) => {
       .catch((error) => console.warn(`ops result not sent: ${(error as Error).message}`));
   }
 });
+if (puck) {
+  puck.catch((error) => console.error("puck:", error.error));
+  void registerPuckCommands(puck).catch((error) => console.warn(`puck commands not registered: ${(error as Error).message}`));
+  void puck.start({ allowed_updates: ["message"], onStart: (me) => console.log(`puck polling as @${me.username}`) });
+}
 await bot.start({
   allowed_updates: ["message", "inline_query", "my_chat_member", "callback_query", "stopped_message_generation"],
   onStart: (me) => console.log(`polling as @${me.username} (reads all group messages: ${me.can_read_all_group_messages})`),

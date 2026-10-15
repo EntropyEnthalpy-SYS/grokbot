@@ -119,6 +119,18 @@ export class GroupStore {
   disable(chatId: number): void {
     this.#db.prepare("DELETE FROM groups WHERE chat_id = ?").run(chatId);
     this.#db.prepare("DELETE FROM group_log WHERE chat_id = ?").run(chatId);
+    this.#db.prepare("DELETE FROM open_topics WHERE chat_id = ?").run(chatId);
+  }
+
+  /** A topic opened with /topic: every message in it is for the bot. */
+  openTopic(chatId: number, threadId: number, openedBy: number): void {
+    this.#db
+      .prepare("INSERT OR REPLACE INTO open_topics (chat_id, thread_id, opened_by, at) VALUES (?, ?, ?, ?)")
+      .run(chatId, threadId, openedBy, Date.now());
+  }
+
+  isOpenTopic(chatId: number, threadId: number): boolean {
+    return threadId !== 0 && this.#db.prepare("SELECT 1 FROM open_topics WHERE chat_id = ? AND thread_id = ?").get(chatId, threadId) !== undefined;
   }
 
   linkMode(chatId: number): LinkMode {

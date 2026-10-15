@@ -7,6 +7,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mock, test } from "node:test";
+import { Bot } from "grammy";
 import type { Update } from "grammy/types";
 import { openDbAt } from "../src/db.ts";
 import { createBot, QUESTIONS_PER_USER_PER_HOUR } from "../src/telegram/bot.ts";
@@ -46,6 +47,8 @@ function harness(
     video?: Record<string, unknown>;
     /** Each message the bot sends gets its own id (default: all are message 1). */
     distinctIds?: boolean;
+    /** Run Puck, the bot that opens topics with /topic (its calls go to `puckCalls`). */
+    puck?: boolean;
     /** Draws X posts for /xstyle picture. */
     xPicture?: (post: { text: string }, translation: string | undefined) => Promise<Buffer>;
     /** The chat agent's turn: may call the create_image tool like Grok would. */
@@ -104,7 +107,21 @@ function harness(
       return options.ask?.(system, prompt) ?? "";
     },
   };
+  const puckCalls: { method: string; payload: Record<string, unknown> }[] = [];
+  const puck = options.puck ? new Bot("2:puck") : undefined;
+  if (puck) {
+    puck.botInfo = { id: 998, is_bot: true, first_name: "Puck", username: "PuckTest_bot" } as never;
+    puck.api.config.use(async (_prev, method, payload) => {
+      puckCalls.push({ method, payload: payload as Record<string, unknown> });
+      const chat = { id: GROUP, type: "supergroup", title: "Topics", is_forum: true };
+      if (method === "createForumTopic") return { ok: true, result: { message_thread_id: 77, name: "t", icon_color: 0 } } as never;
+      const thread = (payload as { message_thread_id?: number }).message_thread_id;
+      const result = { message_id: 600 + puckCalls.length, date: 0, chat, from: puck.botInfo, text: (payload as { text?: string }).text };
+      return { ok: true, result: thread ? { ...result, message_thread_id: thread, is_topic_message: true } : result } as never;
+    });
+  }
   const bot = createBot({
+    puck,
     token: "1:test",
     ownerId: OWNER,
     grok: grok as never,
@@ -199,7 +216,7 @@ function harness(
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   };
-  return { bot, calls, runs, until, waitFor, press, actions, groups, reminders, watches, skills, memory, speakers, usage, limits, permissions, polls, asked, created, images, groupText, settle, next: () => ++updateId };
+  return { bot, puck, puckCalls, calls, runs, until, waitFor, press, actions, groups, reminders, watches, skills, memory, speakers, usage, limits, permissions, polls, asked, created, images, groupText, settle, next: () => ++updateId };
 }
 
 test("inline queries reach their handler (they have no chat, unlike every other update)", async () => {
@@ -814,6 +831,50 @@ test("strict groups keep each person's follow-ups apart; a reply to an answer co
     ],
   );
   assert.ok(h.runs[2]!.text.includes(long.slice(0, 300)), "the answer's text beyond what Telegram included");
+});
+
+test("/topic: Puck opens a topic with the question, the bot answers in it, and follow-ups there need no mention", async () => {
+  const h = harness({ loggedIn: true, puck: true });
+  h.groups.enable(GROUP, "Topics");
+  const forum = { id: GROUP, type: "supergroup" as const, title: "Topics", is_forum: true as const };
+  const topic = (from: number, text: string, chat: { id: number; type: "supergroup"; title: string; is_forum?: true } = forum) => {
+    const update = h.groupText(from, text, { chat });
+    return { ...update, message: { ...update.message!, chat } } as Update;
+  };
+  await h.puck!.handleUpdate(topic(OWNER, "/topic 台积电下季度财报什么时候发布？会不会超预期，市场怎么看"));
+  await h.waitFor(() => h.runs.length === 1);
+  const created = h.puckCalls.find((c) => c.method === "createForumTopic")!;
+  assert.equal(created.payload.name, "台积电下季度财报什么时候发布？会不会超预期，市场怎么看");
+  const posted = h.puckCalls.find((c) => c.method === "sendMessage" && c.payload.message_thread_id === 77)!;
+  assert.match(String(posted.payload.text), /^台积电下季度财报什么时候发布？[\s\S]*— user1000001$/);
+  assert.equal(h.runs[0]!.key, sessionKey(GROUP, 77));
+  assert.ok(h.runs[0]!.text.includes("台积电下季度财报"));
+  assert.ok(!h.runs[0]!.text.includes("— user1000001"), "the asker's signature isn't part of the question");
+  await h.waitFor(() => h.calls.some((c) => c.method === "sendMessage" && c.payload.message_thread_id === 77));
+  const answer = h.calls.find((c) => c.method === "sendMessage" && c.payload.message_thread_id === 77)!;
+  assert.equal((answer.payload.reply_parameters as { message_id: number }).message_id, 602, "replies to Puck's question");
+  await h.waitFor(() => h.puckCalls.some((c) => String(c.payload.text).includes("t.me/c/1234567890/77")));
+
+  // Inside the topic: a member's follow-up without "grok" is answered; "哈哈" isn't.
+  const inTopic = { message_thread_id: 77, is_topic_message: true };
+  const followUp = topic(5, "那去年同期呢");
+  await h.bot.handleUpdate({ ...followUp, message: { ...followUp.message!, ...inTopic } } as Update);
+  await h.waitFor(() => h.runs.length === 2);
+  const laugh = topic(5, "哈哈");
+  await h.bot.handleUpdate({ ...laugh, message: { ...laugh.message!, ...inTopic } } as Update);
+  // The General topic is unchanged: no mention, no answer.
+  await h.bot.handleUpdate(topic(5, "那去年同期呢"));
+  await h.settle();
+  assert.deepEqual(h.runs.map((r) => r.key), [sessionKey(GROUP, 77), sessionKey(GROUP, 77)]);
+
+  // Only the owner and trusted members open topics, only where Topics are on.
+  const before = h.puckCalls.filter((c) => c.method === "createForumTopic").length;
+  await h.puck!.handleUpdate(topic(5, "/topic 我也想问"));
+  await h.puck!.handleUpdate(topic(OWNER, "/topic 普通群", { id: GROUP, type: "supergroup", title: "Plain" }));
+  await h.settle();
+  assert.equal(h.puckCalls.filter((c) => c.method === "createForumTopic").length, before);
+  assert.ok(h.puckCalls.some((c) => String(c.payload.text).includes("Only the owner and trusted members")));
+  assert.ok(h.puckCalls.some((c) => String(c.payload.text).includes("doesn't have Topics")));
 });
 
 test("blocked people are ignored everywhere; approved-only groups ignore members who aren't approved", async () => {

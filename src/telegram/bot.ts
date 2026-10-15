@@ -1,4 +1,4 @@
-import { Bot, InputFile, type Context } from "grammy";
+import { Bot, Context, InputFile } from "grammy";
 import type { ImageStudio } from "../agent/images.ts";
 import type { PollDesk } from "../agent/polls.ts";
 import type { ActionDesk } from "../agent/actions.ts";
@@ -16,7 +16,7 @@ import { MEMBER_HELP, OWNER_HELP } from "./guide.ts";
 import { addLocalDays, findTimeZone, formatFromNow, formatLocalTime as formatInZone, timeZone, zoneLabel } from "../time.ts";
 import { InputFile as VoiceFile } from "grammy";
 import { MAX_FACTS_PER_CHAT, type MemoryStore } from "../memory.ts";
-import type { Message } from "grammy/types";
+import type { Message, Update } from "grammy/types";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { TurnCancelledError, type ChatSessions } from "../agent/sessions.ts";
 import { assistantText, CHAT_PROVIDERS, errorMessage, ROUTES, type Grok, type ProbeResult, type Route } from "../grok/grok.ts";
@@ -45,6 +45,7 @@ import {
   describeMessage,
   displayName,
   isAddressedToBot,
+  isJustReaction,
   LANGUAGES,
   languageName,
   LINK_MODES,
@@ -66,6 +67,7 @@ import { groupConversation, personalKey, sessionKey } from "./conversations.ts";
 
 export { sessionKey };
 import { AlbumCollector } from "./albums.ts";
+import { installPuck } from "./puck.ts";
 import type { FileDesk } from "../agent/files.ts";
 import { editParagraphs, openForEdit, wantsEditedFile } from "../media/edit.ts";
 import { isReadableDocument } from "../media/documents.ts";
@@ -196,6 +198,8 @@ export interface BotDeps {
   inlinePublic?: boolean;
   /** Local Bot API server, e.g. http://127.0.0.1:8081 (2000 MB files); default Telegram's cloud. */
   apiRoot?: string;
+  /** A second bot that opens forum topics with /topic and posts the question there; this bot answers in them. */
+  puck?: Bot;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -251,6 +255,7 @@ export function createBot({
   inlinePublic = false,
   apiRoot,
   xPicture,
+  puck,
 }: BotDeps): Bot {
   const bot = new Bot(token, apiRoot ? { client: { apiRoot } } : undefined);
   const media = new TelegramMedia({ api: bot.api, token, grok, video: links.video, apiRoot });
@@ -1358,6 +1363,24 @@ export function createBot({
     groups.prune();
   }
 
+  if (puck) {
+    installPuck(puck, {
+      refusal: (chatId, user) => {
+        if (!groups.isEnabled(chatId)) return "I'm not enabled in this group yet (the owner sends /enable to the main bot).";
+        if (user.id !== ownerId && !limits.trusted().has(user.id)) return "⛔ Only the owner and trusted members can open topics.";
+        return undefined;
+      },
+      // The question Puck posted, as if the asker had sent it: the answer replies to it inside the topic.
+      opened: (posted, question, asker) => {
+        const threadId = posted.message_thread_id!;
+        groups.openTopic(posted.chat.id, threadId, asker.id);
+        const message = { ...posted, from: asker, text: question, entities: undefined, is_topic_message: true } as Message & Update.NonChannel;
+        const ctx = new Context({ update_id: 0, message }, bot.api, bot.botInfo);
+        background(ctx, () => answers.use(() => answerInGroup(ctx, message, threadId)));
+      },
+    });
+  }
+
   function onGroupMessage(ctx: Context, message: Message): void {
     const me = { id: ctx.me.id, username: ctx.me.username };
     if (message.from?.is_bot) return;
@@ -1365,7 +1388,9 @@ export function createBot({
     const threadId = threadIdOf(message);
     // Focused groups keep normal's automatic features (voice transcripts, round videos); only the AI's background differs.
     const normal = groups.privacy(chatId) !== "strict";
-    if (isAddressedToBot(message, me)) {
+    // A topic opened with /topic is a conversation with the bot: everything but "ok"/"哈哈"/stickers is for it.
+    const inOpenTopic = groups.isOpenTopic(chatId, threadId) && !isJustReaction(message);
+    if (inOpenTopic || isAddressedToBot(message, me)) {
       // One answer per album, however many of its pictures count as addressed.
       if (!albums.claim(message)) return;
       if (!mayAsk(ctx, chatId)) return refuseOverLimit(ctx, message, threadId);
