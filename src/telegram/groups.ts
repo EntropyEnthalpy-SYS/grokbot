@@ -487,14 +487,17 @@ const NAME_WORD = /^\s*grok\s+/i;
 /** …but not a remark about Grok: "grok is down", "Grok 4.7 is out", "grok team shipped…". */
 const REMARK = /^\s*grok\s+(?:is|isn't|was|wasn't|are|were|has|hasn't|had|have|did|didn't|does|doesn't|can't|cannot|won't|will|would|said|says|told|got|gets|seems|looks|keeps|kept|went|just|also|still|and|or|vs|team|users?|\d)\b/i;
 
+/** A Chinese question anywhere: "grok 6.1terra api价格是多少？别说假话" asks, though it starts like "Grok 4.7 is out". */
+const CHINESE_QUESTION = /？|吗|嗎|什么|什麼|多少|几|幾|怎么|怎麼|为什么|為什麼|哪|谁|誰|呢/;
+
 /**
  * Whether the text starts by calling the bot by name. Remarks about Grok ("grok's answer was wrong",
- * "grok is down") don't count unless they end with a question mark or carry a link.
+ * "grok is down") don't count unless they end with a question mark, ask in Chinese or carry a link.
  */
 function callsBotByName(text: string): boolean {
   if (NAME_TRIGGER.test(text)) return true;
   if (!NAME_WORD.test(text)) return false;
-  return !REMARK.test(text) || /[?？]\s*$/.test(text) || /https?:\/\//i.test(text);
+  return !REMARK.test(text) || /[?？]\s*$/.test(text) || CHINESE_QUESTION.test(text) || /https?:\/\//i.test(text);
 }
 
 /**
