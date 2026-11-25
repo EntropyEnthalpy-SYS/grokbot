@@ -18,7 +18,7 @@ test("CDN candidates: known-good hosts first, original last, query kept", () => 
   assert.equal(candidateUrls(akam)[0], akam, "an already-good host is tried as is first");
 });
 
-test("downloads each stream from the first host that answers, through the tunnel only for metadata, then merges", async () => {
+test("downloads each stream from the host that serves a sample fastest, through the tunnel only for metadata, then merges", async () => {
   const dir = mkdtempSync(join(tmpdir(), "bili-"));
   // Real media so ffmpeg can merge: a video-only and an audio-only file.
   const video = join(dir, "src-v.mp4");
@@ -43,8 +43,10 @@ test("downloads each stream from the first host that answers, through the tunnel
     const url = String(input);
     const host = new URL(url).hostname;
     const range = new Headers(init?.headers).get("range");
-    requests.push(`${host}${range ? " probe" : ""}`);
-    if (host === "upos-sz-upcdnbda2.bilivideo.com" && url.includes("v.m4s")) return new Response("forbidden", { status: 403 });
+    if (!range) requests.push(host);
+    // Video: akamai refuses, upcdnbda2 works but slowly, the original (cosov) is fastest.
+    if (host === "upos-hz-mirrorakam.akamaized.net" && url.includes("v.m4s")) return new Response("forbidden", { status: 403 });
+    if (host === "upos-sz-upcdnbda2.bilivideo.com") await new Promise((r) => setTimeout(r, 100));
     const file = url.includes("v.m4s") ? video : audio;
     return new Response(range ? "x" : readFileSync(file), { status: range ? 206 : 200 });
   }) as typeof fetch;
@@ -57,13 +59,7 @@ test("downloads each stream from the first host that answers, through the tunnel
     fetchImpl,
   });
   assert.match(readFileSync(log, "utf8"), /^--proxy socks5:\/\/127\.0\.0\.1:1080 -j /);
-  assert.deepEqual(requests, [
-    "upos-sz-upcdnbda2.bilivideo.com probe",
-    "upos-hz-mirrorakam.akamaized.net probe",
-    "upos-hz-mirrorakam.akamaized.net",
-    "upos-hz-mirrorakam.akamaized.net probe",
-    "upos-hz-mirrorakam.akamaized.net",
-  ]);
+  assert.deepEqual(requests, ["upos-sz-mirrorcosov.bilivideo.com", "upos-hz-mirrorakam.akamaized.net"], "full downloads go to the fastest working host");
   assert.equal(out.path, join(dir, "work", "bilibili.mp4"));
   assert.deepEqual({ w: out.width, h: out.height, d: out.duration }, { w: 320, h: 240, d: 2 });
   assert.ok(out.size > 1000);

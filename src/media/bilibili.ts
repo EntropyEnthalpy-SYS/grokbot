@@ -9,11 +9,11 @@ import { run } from "./run.ts";
  * Bilibili blocks the main VPS's IP for its website and API (HTTP 412), and
  * its video CDN crawls (~130 KB/s) through the Taiwan tunnel. So: ask yt-dlp
  * for the stream URLs through the tunnel, then download the streams directly
- * from a CDN host that serves this VPS (rewriting the host like ParseHub does),
- * and merge them with ffmpeg.
+ * from the fastest CDN host for this VPS (the original, or rewritten like
+ * ParseHub does), and merge them with ffmpeg.
  */
 
-/** CDN hosts tried in order; the first answering a 1-byte range request wins. */
+/** CDN hosts tried besides the original; the one serving a sample fastest wins. */
 export const BILIBILI_CDN_HOSTS = ["upos-sz-upcdnbda2.bilivideo.com", "upos-hz-mirrorakam.akamaized.net"];
 
 export interface BiliStream {
@@ -93,18 +93,36 @@ export function candidateUrls(raw: string, hosts: readonly string[] = BILIBILI_C
   return [...new Set(hosts.includes(original.hostname) ? [raw, ...rewritten] : [...rewritten, raw])];
 }
 
+/** Size of the sample each candidate host downloads; the fastest host gets the whole stream. */
+const SAMPLE_BYTES = 1024 * 1024;
+
+/**
+ * Which host is fast changes (the original was ~30× faster than the rewritten
+ * ones on Oct 27, the reverse on Oct 25), so time a sample from each at once.
+ */
+async function hostsBySpeed(stream: BiliStream, options: BiliOptions, errors: string[]): Promise<string[]> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const timed = await Promise.all(
+    candidateUrls(stream.url).map(async (url) => {
+      const started = performance.now();
+      try {
+        const response = await fetchImpl(url, { headers: { ...stream.headers, Range: `bytes=0-${SAMPLE_BYTES - 1}` }, signal: timeout(options.signal, 15_000) });
+        if (!response.ok) throw new Error(String(response.status));
+        await response.arrayBuffer();
+        return { url, ms: performance.now() - started };
+      } catch (error) {
+        errors.push(`${new URL(url).hostname}: ${(error as Error).message}`);
+        return undefined;
+      }
+    }),
+  );
+  return timed.filter((t) => t !== undefined).sort((a, b) => a.ms - b.ms).map((t) => t.url);
+}
+
 async function downloadStream(stream: BiliStream, path: string, options: BiliOptions): Promise<void> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const errors: string[] = [];
-  for (const candidate of candidateUrls(stream.url)) {
-    const probe = await fetchImpl(candidate, { headers: { ...stream.headers, Range: "bytes=0-0" }, signal: timeout(options.signal, 15_000) }).catch(
-      (error: Error) => ({ ok: false, status: error.message }) as const,
-    );
-    if (!probe.ok) {
-      errors.push(`${new URL(candidate).hostname}: ${probe.status}`);
-      continue;
-    }
-    await (probe as Response).body?.cancel();
+  for (const candidate of await hostsBySpeed(stream, options, errors)) {
     const response = await fetchImpl(candidate, { headers: stream.headers, signal: timeout(options.signal, 15 * 60_000) });
     if (!response.ok || !response.body) {
       errors.push(`${new URL(candidate).hostname}: ${response.status}`);
