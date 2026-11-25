@@ -140,7 +140,7 @@ const bot = createBot({
     parsehub,
     cache,
     mediaDir: `${config.dataDir}/media`,
-    downloaders: { bilibili: bilibiliDownloader({ ...config, maxBytes: config.maxUploadMb * 1024 * 1024 }) },
+    downloaders: { bilibili: bilibiliDownloader({ ...config, ytdlpPath: config.bilibiliYtdlpPath ?? config.ytdlpPath, maxBytes: config.maxUploadMb * 1024 * 1024 }) },
     uploadLimits: { photoBytes: 10 * 1024 * 1024, videoBytes: config.maxUploadMb * 1024 * 1024 },
   },
 });

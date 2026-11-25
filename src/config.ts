@@ -11,6 +11,8 @@ export interface Config {
   tavilyKey?: string;
   /** yt-dlp executable (default: "yt-dlp" on PATH). */
   ytdlpPath?: string;
+  /** yt-dlp for Bilibili only, e.g. a patched build the daily update leaves alone (default ytdlpPath). */
+  bilibiliYtdlpPath?: string;
   /** Proxy for yt-dlp, e.g. "socks5://user:pass@host:1080", for sites that block the server (Bilibili). */
   ytdlpProxy?: string;
   /** ParseHub helper (sidecar/parsehub_server.py), e.g. http://127.0.0.1:8765. */
@@ -48,6 +50,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     defaultModel: env.GROK_MODEL?.trim() || "grok-4.7",
     tavilyKey: env.TAVILY_API_KEY?.trim() || undefined,
     ytdlpPath: env.YTDLP_PATH?.trim() || undefined,
+    bilibiliYtdlpPath: env.YTDLP_BILIBILI_PATH?.trim() || undefined,
     ytdlpProxy: env.YTDLP_PROXY?.trim() || undefined,
     parsehubUrl: env.PARSEHUB_URL?.trim() || undefined,
     fontDir: env.FONT_DIR?.trim() || "/usr/local/share/grokbot-fonts",
