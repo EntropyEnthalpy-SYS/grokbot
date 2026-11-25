@@ -198,6 +198,26 @@ test("re-posted link: sent from cache without touching ParseHub; disabled platfo
   assert.deepEqual((calls as string[]).map((c) => c.split(" ")[0]), ["/parse"]);
 });
 
+test("failed download: text-only card is sent but not cached, so the next post downloads again", async () => {
+  const { impl, calls } = fakeSidecar({
+    "/parse": () => ({ status: 200, body: { supported: true, post: douyin } }),
+    "/download": () => ({ status: 500, body: { error: "cdn timeout" } }),
+  });
+  const cache = new CardCache(openDbAt(":memory:"));
+  const api: CardApi = {
+    sendMessage: async () => ({ message_id: 1 }),
+    sendPhoto: async () => ({ message_id: 2 }),
+    sendVideo: async () => ({ message_id: 3 }),
+    sendMediaGroup: async () => [],
+  };
+  const deps = { parsehub: new ParseHubClient({ baseUrl: "http://s", fetchImpl: impl }), api, limits: CLOUD_LIMITS, translate: async () => undefined, cache };
+  const first = await sendPostCard(deps, -1, "https://v.douyin.com/a/", "zh-tw", {});
+  assert.equal(first.status, "sent");
+  assert.equal(cache.get("https://v.douyin.com/a/", "zh-tw"), undefined);
+  await sendPostCard(deps, -1, "https://v.douyin.com/a/", "zh-tw", {});
+  assert.deepEqual(calls.map((c) => c.split(" ")[0]), ["/parse", "/download", "/parse", "/download"]);
+});
+
 test("only link-only messages may be deleted", () => {
   assert.equal(isOnlyLinks("https://v.douyin.com/a/  https://x.com/b/status/1", ["https://v.douyin.com/a/", "https://x.com/b/status/1"]), true);
   assert.equal(isOnlyLinks("看這個 https://v.douyin.com/a/", ["https://v.douyin.com/a/"]), false);

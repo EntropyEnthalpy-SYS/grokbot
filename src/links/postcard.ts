@@ -48,10 +48,12 @@ export async function sendPostCard(deps: PostCardDeps, chatId: number, url: stri
   if (deps.allowed && !deps.allowed(platform)) return { status: "disabled", platform };
 
   let download: PhDownload = { post, dir: "", files: [] };
+  let failed = false;
   try {
     const own = deps.downloaders?.[platform];
     download = own ? await own(url, post) : await deps.parsehub.download(url);
   } catch (error) {
+    failed = true;
     console.warn(`ParseHub download failed for ${url}, sending text only: ${(error as Error).message}`);
   }
   const work = await mkdtemp(join(tmpdir(), "grokbot-card-"));
@@ -61,7 +63,8 @@ export async function sendPostCard(deps: PostCardDeps, chatId: number, url: stri
     const translation = text && needsTranslation({ text, lang: undefined }, lang) ? await deps.translate(text, lang) : undefined;
     const card: XCard = buildPostCard(download, url, media, notes, translation);
     const sent = await sendXCard(deps.api, chatId, card, options);
-    if (sent.reusable) deps.cache?.put(url, lang, platform, sent.reusable);
+    // A text-only card from a failed download is not cached, so the next post of the link retries it.
+    if (sent.reusable && !failed) deps.cache?.put(url, lang, platform, sent.reusable);
     return { status: "sent", ids: sent.ids, plain: card.plain, platform, cached: false };
   } finally {
     await rm(work, { recursive: true, force: true });
