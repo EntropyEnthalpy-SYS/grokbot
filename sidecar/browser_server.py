@@ -8,8 +8,10 @@ The systemd unit (deploy/grokbot-browser.service) is what keeps pages away from 
 IPAddressDeny blocks loopback and private networks for Chromium, so a link can't reach local services.
 """
 
+import ipaddress
 import json
 import os
+import socket
 import shutil
 import subprocess
 import tempfile
@@ -24,6 +26,15 @@ TIMEOUT_S = 35
 MAX_HTML = 3 * 1024 * 1024
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 one_at_a_time = threading.Semaphore(1)
+
+
+def public_host(host: str) -> bool:
+    """Every address the name resolves to is on the public internet (a fast refusal; the unit's IPAddressDeny is the real guard)."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return True  # unknown names fail in the browser with a normal error
+    return all(ipaddress.ip_address(info[4][0].split("%")[0]).is_global for info in infos)
 
 
 def render(url: str) -> str:
@@ -59,6 +70,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": "bad request"})
         if urlparse(url).scheme not in ("http", "https") or not urlparse(url).hostname:
             return self.reply(400, {"error": "only http(s) links"})
+        if not public_host(urlparse(url).hostname):
+            return self.reply(403, {"error": "not a public address"})
         with one_at_a_time:
             try:
                 return self.reply(200, {"html": render(url)})
