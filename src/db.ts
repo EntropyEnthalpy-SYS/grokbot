@@ -204,6 +204,9 @@ export function openDbAt(path: string): Db {
   db.prepare("DELETE FROM settings WHERE key = 'answers_tracked_since'").run();
   // How X posts are shown: "text" (caption under the post's media) or "picture" (drawn like the post).
   addColumnIfMissing(db, "groups", "x_style", "TEXT NOT NULL DEFAULT 'text'");
+  // 🖥 Servers: the forum topic where the owner works on each server (/servers in the group).
+  addColumnIfMissing(db, "servers", "chat_id", "INTEGER");
+  addColumnIfMissing(db, "servers", "thread_id", "INTEGER");
   migrateTrusted(db);
   return db;
 }

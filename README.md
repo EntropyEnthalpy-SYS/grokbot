@@ -32,7 +32,7 @@ Plain TypeScript on Node 24 (no build step), [grammY](https://grammy.dev), [pi](
 | 📈 Usage · ⚖️ Limits | Usage per member, chat and provider, with day-by-day charts; adjustable per-member and per-group limits. |
 | 📊 Status · 🩺 Health | Logins, quota, live checks of every dependency. |
 | 🛠 Maintenance | Service status, recent errors, update yt-dlp/ParseHub, restart, backup (without logins) — no SSH needed. |
-| 🖥 Servers | Your servers the AI may work on over SSH from your private chat (“LA 的磁盘怎么样？”). The bot logs in with its own key (you paste one line on each server; no passwords stored). Commands that only look run at once; anything that changes the server waits for your ✅. Every command is logged. |
+| 🖥 Servers | Your servers the AI may work on over SSH from your private chat (“LA 的磁盘怎么样？”). The bot logs in with its own key (you paste one line on each server; no passwords stored). Commands that only look run at once; anything that changes the server waits for your ✅. Every command is logged. `/servers` in a forum group gives each server its own topic, where you just type (only your messages count there). |
 
 ## Architecture
 

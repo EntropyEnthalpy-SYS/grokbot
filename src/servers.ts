@@ -5,7 +5,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { Db } from "./db.ts";
+import { getSetting, setSetting, type Db } from "./db.ts";
 import { redactSecrets } from "./redact.ts";
 
 /**
@@ -21,6 +21,9 @@ export interface Server {
   host: string;
   port: number;
   user: string;
+  /** Its forum topic (/servers in the owner's group), where every owner message is about this server. */
+  chatId?: number;
+  threadId?: number;
 }
 
 export interface CommandResult {
@@ -29,8 +32,11 @@ export interface CommandResult {
   timedOut: boolean;
 }
 
-/** Asks the owner to approve a command that changes something; resolves false when declined, unanswered or stopped. */
-export type Approver = (server: Server, command: string, signal?: AbortSignal) => Promise<boolean>;
+/**
+ * Asks the owner to approve a command that changes something. Resolves to a callback that reports how the
+ * command ended, or undefined when declined, unanswered or stopped.
+ */
+export type Approver = (server: Server, command: string, signal?: AbortSignal) => Promise<((result: CommandResult) => void) | undefined>;
 
 const COMMAND_TIMEOUT_MS = 60_000;
 const OUTPUT_CHARS = 12_000;
@@ -38,7 +44,7 @@ const COMMANDS_PER_TURN = 25;
 /** Longer changing commands can't be shown in full in the ✅ message. */
 const APPROVAL_CHARS = 3000;
 
-type Row = { id: number; name: string; host: string; port: number; user: string };
+type Row = { id: number; name: string; host: string; port: number; user: string; chat_id: number | null; thread_id: number | null };
 
 export class ServerDesk {
   readonly #db: Db;
@@ -51,7 +57,49 @@ export class ServerDesk {
   }
 
   list(): Server[] {
-    return (this.#db.prepare("SELECT id, name, host, port, user FROM servers ORDER BY id").all() as Row[]).map((r) => ({ ...r, id: Number(r.id), port: Number(r.port) }));
+    return (this.#db.prepare("SELECT id, name, host, port, user, chat_id, thread_id FROM servers ORDER BY id").all() as Row[]).map((r) => ({
+      id: Number(r.id),
+      name: r.name,
+      host: r.host,
+      port: Number(r.port),
+      user: r.user,
+      ...(r.chat_id !== null && r.thread_id !== null ? { chatId: Number(r.chat_id), threadId: Number(r.thread_id) } : {}),
+    }));
+  }
+
+  /** The forum group with one topic per server, if the owner set one up with /servers. */
+  get group(): number | undefined {
+    const value = getSetting(this.#db, "server_group");
+    return value ? Number(value) : undefined;
+  }
+
+  set group(chatId: number | undefined) {
+    setSetting(this.#db, "server_group", chatId === undefined ? "" : String(chatId));
+    if (chatId === undefined) this.#db.prepare("UPDATE servers SET chat_id = NULL, thread_id = NULL").run();
+  }
+
+  setTopic(id: number, chatId: number, threadId: number): void {
+    this.#db.prepare("UPDATE servers SET chat_id = ?, thread_id = ? WHERE id = ?").run(chatId, threadId, id);
+  }
+
+  /** The server whose topic this is (in the current server group). */
+  inTopic(chatId: number, threadId: number): Server | undefined {
+    if (!threadId || chatId !== this.group) return undefined;
+    return this.list().find((s) => s.chatId === chatId && s.threadId === threadId);
+  }
+
+  /** The server whose topic a conversation key belongs to ("tg:-100…:topic:7", maybe with a suffix). */
+  forKey(key: string): Server | undefined {
+    const match = /^tg:(-\d+):topic:(\d+)(?::|$)/.exec(key);
+    return match ? this.inTopic(Number(match[1]), Number(match[2])) : undefined;
+  }
+
+  /** Added to the system prompt in a server's topic. */
+  promptBlock(key: string): string {
+    const server = this.forKey(key);
+    return server
+      ? `\n- This forum topic is the owner's workspace for the server ${server.name} (${server.user}@${server.host}). Questions here are about it: use server_run with server "${server.name}" unless the owner names another server.`
+      : "";
   }
 
   find(name: string): Server | undefined {
@@ -167,19 +215,21 @@ export class ServerDesk {
         const approve = this.#turns.get(key);
         const server = this.find(name);
         const fail = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined, isError: true });
-        if (!approve) return fail("Server commands work only in the owner's private chat.");
+        if (!approve) return fail("Server commands work only for the owner, in their private chat or a server's topic.");
         if (!server) return fail(`No server called "${name}". Servers: ${this.list().map((s) => s.name).join(", ") || "none"}.`);
         if (!command.trim()) return fail("Empty command.");
         if (++used > COMMANDS_PER_TURN) return fail(`At most ${COMMANDS_PER_TURN} commands per answer. Report what you found.`);
         const readOnly = isReadOnly(command);
         if (!readOnly && command.length > APPROVAL_CHARS) return fail(`Too long to show the owner for approval (${command.length} characters, limit ${APPROVAL_CHARS}). Split it into smaller steps.`);
-        if (!readOnly && !(await approve(server, command, signal))) {
+        const approved = readOnly ? undefined : await approve(server, command, signal);
+        if (!readOnly && !approved) {
           this.#log(server, command, "declined", null);
           return fail("The owner didn't approve this command (declined or no answer in 5 minutes). It did not run. Don't retry it; say what it would have done.");
         }
         if (signal?.aborted) return fail("Stopped.");
         const result = await this.exec(server, command, COMMAND_TIMEOUT_MS, signal);
         this.#log(server, command, readOnly ? "read-only" : "approved", result.exitCode);
+        approved?.(result);
         if (signal?.aborted) return fail("Stopped; the command was killed.");
         const output = hideSecrets(result.output);
         const shown = output.length > OUTPUT_CHARS ? `${output.slice(0, 3000)}\n[… ${output.length - OUTPUT_CHARS} characters omitted …]\n${output.slice(-(OUTPUT_CHARS - 3000))}` : output;

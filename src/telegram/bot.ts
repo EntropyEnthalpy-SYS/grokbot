@@ -70,7 +70,8 @@ import { AlbumCollector } from "./albums.ts";
 import { installPuck } from "./puck.ts";
 import type { FileDesk } from "../agent/files.ts";
 import type { CodeDesk, SandboxFile } from "../agent/sandbox.ts";
-import type { Approver, Server, ServerDesk } from "../servers.ts";
+import type { Approver, CommandResult, Server, ServerDesk } from "../servers.ts";
+import { topicLink } from "./puck.ts";
 import { editParagraphs, openForEdit, wantsEditedFile } from "../media/edit.ts";
 import { isReadableDocument } from "../media/documents.ts";
 import { RateLimiter } from "./rateLimit.ts";
@@ -339,13 +340,19 @@ export function createBot({
     });
   }
 
-  // server_run wants to change a server: the command with ✅ Run / ❌ Cancel in the owner's chat, for 5 minutes.
+  // server_run wants to change a server: the command with ✅ Run / ❌ Cancel where the owner asked, for 5 minutes.
   const serverAsks = new Map<string, (outcome: "run" | "cancel") => void>();
-  const askToRun = async (server: Server, command: string, signal?: AbortSignal): Promise<boolean> => {
+  const askToRun = async (
+    where: { chatId: number; threadId?: number },
+    server: Server,
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<((result: CommandResult) => void) | undefined> => {
     const id = randomUUID().slice(0, 8);
     const shown = `🖥 <b>${escapeHtml(server.name)}</b> (${escapeHtml(`${server.user}@${server.host}`)})\n<pre>${escapeHtml(command)}</pre>`;
-    const sent = await bot.api.sendMessage(ownerId, `${shown}\nRun this?`, {
+    const sent = await bot.api.sendMessage(where.chatId, `${shown}\nRun this?`, {
       parse_mode: "HTML",
+      ...(where.threadId ? { message_thread_id: where.threadId } : {}),
       reply_markup: { inline_keyboard: [[{ text: "✅ Run", callback_data: `srv:y:${id}` }, { text: "❌ Cancel", callback_data: `srv:n:${id}` }]] },
     });
     const outcome = await new Promise<"run" | "cancel" | "expired" | "stopped">((resolve) => {
@@ -361,10 +368,71 @@ export function createBot({
       signal?.addEventListener("abort", stop, { once: true });
       serverAsks.set(id, finish);
     });
-    const note = { run: "✅ Running…", cancel: "❌ Cancelled, not run.", expired: "⌛ No answer in 5 minutes, not run.", stopped: "⏹ Answer stopped, not run." }[outcome];
-    await bot.api.editMessageText(ownerId, sent.message_id, `${shown}\n<i>${note}</i>`, { parse_mode: "HTML" }).catch(() => undefined);
-    return outcome === "run";
+    const note = (text: string) =>
+      bot.api.editMessageText(where.chatId, sent.message_id, `${shown}\n<i>${text}</i>`, { parse_mode: "HTML" }).catch(() => undefined);
+    await note({ run: "✅ Running…", cancel: "❌ Cancelled, not run.", expired: "⌛ No answer in 5 minutes, not run.", stopped: "⏹ Answer stopped, not run." }[outcome]);
+    if (outcome !== "run") return undefined;
+    return (result) =>
+      void note(
+        result.timedOut ? "⏱ Stopped after 60 s." : result.exitCode === 0 ? "✅ Done." : result.exitCode === null ? "⏹ Stopped." : `⚠️ Ran, exit code ${result.exitCode}.`,
+      );
   };
+
+  /**
+   * /servers in a forum group: one topic per server ("🖥 LA"), where the owner just types. Re-running it
+   * recreates topics that were deleted; servers added later get theirs from /admin.
+   */
+  const serverTopic = async (server: Server, chatId: number): Promise<string> => {
+    if (server.chatId === chatId && server.threadId) {
+      // Still there? Renaming to the same name fails only when the topic is gone.
+      const alive = await bot.api.editForumTopic(chatId, server.threadId, { name: `🖥 ${server.name}` }).then(
+        () => true,
+        (error) => /TOPIC_NOT_MODIFIED/i.test(errorMessage(error)),
+      );
+      if (alive) return topicLink(chatId, server.threadId);
+    }
+    const topic = await bot.api.createForumTopic(chatId, `🖥 ${server.name}`);
+    servers!.setTopic(server.id, chatId, topic.message_thread_id);
+    await bot.api.sendMessage(
+      chatId,
+      [
+        `🖥 <b>${escapeHtml(server.name)}</b> · <code>${escapeHtml(`${server.user}@${server.host}`)}</code> port ${server.port}`,
+        "Ask about this server here, no “grok” needed: <i>磁盘和内存怎么样？</i> · <i>nginx 为什么挂了？</i>",
+        "Commands that only look run at once; anything that changes the server waits for your ✅ here. Only the owner's messages are used in this topic.",
+      ].join("\n"),
+      { parse_mode: "HTML", message_thread_id: topic.message_thread_id },
+    );
+    return topicLink(chatId, topic.message_thread_id);
+  };
+
+  if (servers) {
+    bot.command("servers", async (ctx) => {
+      if (!isOwner(ctx)) return ctx.reply("Only the bot owner can do that.");
+      const chat = ctx.chat;
+      if (chat.type === "private") return ctx.reply("Servers are in /admin → 🖥 Servers. To give each server its own topic, send /servers in your forum group.");
+      if (chat.type !== "supergroup" || !chat.is_forum) return ctx.reply("Turn on Topics in this group first (group settings → Topics), then send /servers again.");
+      if (!groups.isEnabled(chat.id)) return ctx.reply("Send /enable here first.");
+      if (ctx.match.trim().toLowerCase() === "off") {
+        if (servers.group === chat.id) servers.group = undefined;
+        return ctx.reply("🖥 Server topics are off here. The topics stay, but commands no longer run from them.");
+      }
+      if (servers.list().length === 0) return ctx.reply("No servers yet. Add one in /admin → 🖥 Servers (in our private chat), then send /servers here.");
+      if (servers.group !== chat.id) servers.group = chat.id;
+      const lines: string[] = [];
+      for (const server of servers.list()) {
+        try {
+          lines.push(`🖥 <a href="${await serverTopic(server, chat.id)}">${escapeHtml(server.name)}</a>`);
+        } catch (error) {
+          const text = errorMessage(error);
+          lines.push(`❌ ${escapeHtml(server.name)}: ${escapeHtml(/not enough rights|CHAT_ADMIN_REQUIRED|rights/i.test(text) ? "make me an admin with “Manage topics”, then send /servers again" : text)}`);
+        }
+      }
+      return ctx.reply(["One topic per server; just type in it (only your messages are used there):", ...lines, "", "<code>/servers off</code> stops this."].join("\n"), {
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+      });
+    });
+  }
   if (servers) {
     bot.callbackQuery(/^srv:(y|n):(\w+)$/, async (ctx) => {
       if (!isOwner(ctx)) return ctx.answerCallbackQuery({ text: "Owner only." });
@@ -545,6 +613,10 @@ export function createBot({
     backup,
     cookies,
     servers,
+    serverTopic: async (server) => {
+      const group = servers?.group;
+      return group === undefined ? undefined : serverTopic(server, group);
+    },
   });
 
   // Owner-only commands. In groups, others get a short refusal.
@@ -1471,8 +1543,11 @@ export function createBot({
     const threadId = threadIdOf(message);
     // Focused groups keep normal's automatic features (voice transcripts, round videos); only the AI's background differs.
     const normal = groups.privacy(chatId) !== "strict";
+    // A server's topic is the owner's workspace for it: their messages are for the bot, nobody else's.
+    const topicServer = servers?.inTopic(chatId, threadId);
+    if (topicServer && message.from?.id !== ownerId) return;
     // A topic opened with /topic is a conversation with the bot: everything but "ok"/"哈哈"/stickers is for it.
-    const inOpenTopic = groups.isOpenTopic(chatId, threadId) && !isJustReaction(message);
+    const inOpenTopic = (topicServer !== undefined || groups.isOpenTopic(chatId, threadId)) && !isJustReaction(message);
     if (inOpenTopic || isAddressedToBot(message, me)) {
       // One answer per album, however many of its pictures count as addressed.
       if (!albums.claim(message)) return;
@@ -1969,7 +2044,9 @@ export function createBot({
     let codeTurn: ReturnType<CodeDesk["begin"]> | undefined;
     // The owner's private chat may run server commands; this turn's own approver, so cleanup removes only ours.
     const serverTurn: Approver | undefined =
-      servers && ctx.chat!.type === "private" && chatId === ownerId ? (server, command, signal) => askToRun(server, command, signal) : undefined;
+      servers && isOwner(ctx) && ((ctx.chat!.type === "private" && chatId === ownerId) || servers.inTopic(chatId, target.threadId ?? 0))
+        ? (server, command, signal) => askToRun({ chatId, threadId: target.threadId }, server, command, signal)
+        : undefined;
     let toolsUsed = false;
     // This turn's author for the remember tool. The next question in the chat may start before this
     // one's cleanup runs, so cleanup removes only our own entry.

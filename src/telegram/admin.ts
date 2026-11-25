@@ -10,7 +10,7 @@ import { formatLocalTime } from "../reminders.ts";
 import { findTimeZone, formatLocalTime as formatInZone, timeZone, zoneLabel } from "../time.ts";
 import { escapeAttr, escapeHtml } from "./format.ts";
 import { GUIDE } from "./guide.ts";
-import type { ServerDesk } from "../servers.ts";
+import type { Server, ServerDesk } from "../servers.ts";
 import { LANGUAGES, LINK_MODES, PRIVACY_MODES, type GroupStore } from "./groups.ts";
 
 const MODELS_PER_PAGE = 8;
@@ -46,6 +46,8 @@ export interface AdminDeps {
   cookies?: CookieStore;
   /** The owner's servers the AI may work on over SSH. */
   servers?: ServerDesk;
+  /** Opens a new server's topic in the server group (/servers); its link, or undefined without a group. */
+  serverTopic?: (server: Server) => Promise<string | undefined>;
 }
 
 const KIND_LABELS: Record<string, string> = { question: "❓", image: "🖼", tr: "🌐", voice_sec: "🎙 min", card: "🔗", tts: "🔊", watch: "👀" };
@@ -806,12 +808,22 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
         "Ask about these servers in this private chat (e.g. <i>LA 的磁盘和内存怎么样？</i>, <i>why is nginx down on HK?</i>) and the AI logs in over SSH to check and fix.",
         "• Commands that only look run at once; anything that changes the server waits for your ✅.",
         "• The bot logs in with its own key. No passwords are stored or typed here.",
-        "• Command output, with secret-looking lines hidden, goes to the AI provider. Only your private chat can use this.",
+        "• Command output, with secret-looking lines hidden, goes to the AI provider. Only you can use this: here, or in the servers' topics.",
+        "",
+        serverGroupLine(),
         "",
         list.length ? `${list.length} server(s):` : "No servers yet.",
       ].join("\n"),
       keyboard,
     };
+  }
+
+  function serverGroupLine(): string {
+    const group = deps.servers?.group;
+    const title = group === undefined ? undefined : (groups.list().find((g) => g.chatId === group)?.title ?? String(group));
+    return title
+      ? `📍 Each server has its own topic in <b>${escapeHtml(title)}</b>.`
+      : "📍 Tip: send /servers in your forum group to give each server its own topic.";
   }
 
   async function serverDetail(id: number, test = false): Promise<Screen> {
@@ -848,7 +860,8 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
     if (confirmed) {
       deps.servers.remove(id);
       const screen = serversScreen();
-      return { ...screen, text: `🗑 Removed ${escapeHtml(server.name)}. To also lock the bot out, delete its line (ending in <code>grokbot@…</code>) from <code>~/.ssh/authorized_keys</code> on that server.\n\n${screen.text}` };
+      const topic = server.threadId ? " Its topic stays in the group; delete it there if you like." : "";
+      return { ...screen, text: `🗑 Removed ${escapeHtml(server.name)}.${topic} To also lock the bot out, delete its line (ending in <code>grokbot@…</code>) from <code>~/.ssh/authorized_keys</code> on that server.\n\n${screen.text}` };
     }
     return {
       text: `Remove <b>${escapeHtml(server.name)}</b> (${escapeHtml(server.host)}) from the list? The AI can no longer use it.`,
@@ -891,15 +904,25 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
     if (!text) return void (await ctx.reply("No server added."));
     const added = deps.servers.add(text);
     if (typeof added === "string") return void (await ctx.reply(`❌ ${added} Tap ➕ Add server to try again.`));
+    const topic = await deps.serverTopic?.(added).catch((error) => `!${errorMessage(error)}`);
     await ctx.reply(
       [
         `🖥 <b>${escapeHtml(added.name)}</b> added (${escapeHtml(`${added.user}@${added.host}`)} port ${added.port}).`,
+        ...(topic?.startsWith("!")
+          ? [`Couldn't open its topic (${escapeHtml(topic.slice(1))}); send /servers in the group to retry.`]
+          : topic
+            ? [`Its topic: <a href="${escapeAttr(topic)}">🖥 ${escapeHtml(added.name)}</a>`]
+            : []),
         "",
         `Last step: log in to it as <b>${escapeHtml(added.user)}</b> (your usual password login is fine), paste this line and press Enter. It lets the bot's key in; nothing else changes.`,
         `<pre>${escapeHtml(await deps.servers.installLine())}</pre>`,
         "Then tap 🔌 Test.",
       ].join("\n"),
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔌 Test", `adm:srvt:${added.id}`).text("🖥 Servers", "adm:srv") },
+      {
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+        reply_markup: new InlineKeyboard().text("🔌 Test", `adm:srvt:${added.id}`).text("🖥 Servers", "adm:srv"),
+      },
     );
   }
 

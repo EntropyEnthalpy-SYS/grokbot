@@ -136,12 +136,13 @@ export function createApp(options: {
       ...(code.available
         ? [{ name: "code", about: "run_code: run Python for exact math, statistics, data files (CSV/Excel) and charts", when: CODE_WORDS, tools: [code.tool(key)] }]
         : []),
-      ...(options.ownerId !== undefined && key === `tg:${options.ownerId}`
-        ? [{ name: "server", about: "server_run: run shell commands on the owner's servers over SSH (check, diagnose, fix)", when: SERVER_WORDS, tools: [servers.tool(key)] }]
+      // The owner's private chat, or a server's topic (where every question is about that server).
+      ...((options.ownerId !== undefined && key === `tg:${options.ownerId}`) || servers.forKey(key)
+        ? [{ name: "server", about: "server_run: run shell commands on the owner's servers over SSH (check, diagnose, fix)", when: servers.forKey(key) ? /[\s\S]/ : SERVER_WORDS, tools: [servers.tool(key)] }]
         : []),
     ],
     systemExtra: (key) =>
-      `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + scriptBlock(groups, chatIdOf(key)) + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key), speakers.get(key)),
+      `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + scriptBlock(groups, chatIdOf(key)) + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key), speakers.get(key)) + servers.promptBlock(key),
   });
   return { db, grok, sessions, groups, reader, video, parsehub, images, files, code, servers, memory, speakers, polls, actions, limits };
 }
