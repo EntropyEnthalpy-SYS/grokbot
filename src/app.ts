@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { ParseHubClient, type PhDownload, type PhPost } from "./links/parsehub.ts";
 import { downloadBilibili } from "./media/bilibili.ts";
 import { LinkReader } from "./links/reader.ts";
+import { browserRenderer } from "./links/browser.ts";
 import { formatSearchResults, searchWebTool, WebSearch } from "./links/search.ts";
 import { VideoReader } from "./media/video.ts";
 import { installAuthRetry } from "./net/authRetry.ts";
@@ -70,6 +71,8 @@ export function createApp(options: {
   mediaDir?: string;
   /** Python environment for run_code (default /opt/pysandbox). */
   sandboxVenv?: string;
+  /** The browser reader's socket (default /run/grokbot-browser/browser.sock; unused when it isn't running). */
+  browserSocket?: string;
   fontDir?: string;
 }): App {
   if (!authRetryInstalled) {
@@ -78,7 +81,7 @@ export function createApp(options: {
   }
   const db = openDb(options.dataDir);
   const grok = new Grok({ db, credentials: new SqliteCredentialStore(db), defaultModel: options.defaultModel });
-  const reader = new LinkReader({ db, tavilyKey: options.tavilyKey });
+  const reader = new LinkReader({ db, tavilyKey: options.tavilyKey, browser: browserRenderer(options.browserSocket ?? "/run/grokbot-browser/browser.sock") });
   // ChatGPT and Claude have no built-in web search: they search with Tavily (Grok uses xAI's own).
   const search = new WebSearch({ tavilyKey: options.tavilyKey });
   if (search.available) grok.webSearch = async (query, signal) => formatSearchResults(query, await search.search(query, { signal }));

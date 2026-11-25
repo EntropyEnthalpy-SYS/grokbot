@@ -51,6 +51,10 @@ if [ ! -x /opt/pysandbox/bin/python ] || ! /opt/pysandbox/bin/python -c "import 
   /opt/pysandbox/bin/pip install --quiet --upgrade pip numpy pandas matplotlib openpyxl xlrd odfpy sympy
 fi
 
+# Browser reader: headless Chromium for pages that need JavaScript, as its own service without local network access.
+command -v chromium >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq chromium >/dev/null; }
+install -m 644 /opt/grokbot/deploy/grokbot-browser.service /etc/systemd/system/grokbot-browser.service
+
 # yt-dlp in its own venv (with curl_cffi for browser impersonation), updated daily.
 if [ ! -x /opt/yt-dlp/bin/yt-dlp ]; then
   python3 -m venv /opt/yt-dlp
@@ -103,6 +107,8 @@ systemctl enable --now grokbot-watchdog.timer >/dev/null 2>&1
 systemctl enable --now yt-dlp-update.timer >/dev/null 2>&1
 systemctl enable grokbot-parsehub >/dev/null 2>&1
 systemctl restart grokbot-parsehub
+systemctl enable grokbot-browser >/dev/null 2>&1
+systemctl restart grokbot-browser
 if grep -qE '^BOT_TOKEN=.+' /etc/grokbot.env && grep -qE '^OWNER_ID=[0-9]+' /etc/grokbot.env; then
   systemctl enable grokbot >/dev/null 2>&1
   systemctl restart grokbot

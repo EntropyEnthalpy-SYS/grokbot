@@ -23,6 +23,8 @@ export interface Config {
   fontDir: string;
   /** Python environment for run_code (deploy.sh installs it at /opt/pysandbox). */
   sandboxVenv?: string;
+  /** Socket of the browser reader service (grokbot-browser.service). */
+  browserSocket?: string;
   /** Answer inline queries from anyone (default: owner only). */
   inlinePublic: boolean;
   /** Local Bot API server URL; when set, uploads and downloads go up to 2000 MB. */
@@ -57,6 +59,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     parsehubUrl: env.PARSEHUB_URL?.trim() || undefined,
     fontDir: env.FONT_DIR?.trim() || "/usr/local/share/grokbot-fonts",
     sandboxVenv: env.SANDBOX_PYTHON?.trim() || undefined,
+    browserSocket: env.BROWSER_SOCKET?.trim() || undefined,
     maxUploadMb: Number(env.MAX_UPLOAD_MB?.trim() || (env.TELEGRAM_API_ROOT?.trim() ? 2000 : 50)) || 50,
     inlinePublic: /^(1|true|yes)$/i.test(env.INLINE_PUBLIC?.trim() ?? ""),
     telegramApiRoot: env.TELEGRAM_API_ROOT?.trim().replace(/\/$/, "") || undefined,

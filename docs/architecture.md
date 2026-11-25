@@ -13,7 +13,7 @@ src/
   grok/              AI providers
     grok.ts          sign-in, provider chain with failover, ask/stream, speech, images, quota
     credentialStore.ts  logins in SQLite (refreshes serialized per provider)
-  agent/             the conversation agent (pi-agent-core)
+  agent/             the conversation agent (pi-agent-core), its tools, on-demand tool sets, run_code's box
     sessions.ts      one agent per chat; history in SQLite; notes/persona/date added per request
     tools.ts         read_link, watch_video
     images.ts · polls.ts   create_image, create_poll tools
@@ -31,6 +31,7 @@ src/
                      notes, reminders/scheduled posts, usage and limits, people, health checks, ops runner client
 
 sidecar/parsehub_server.py   ParseHub wrapped as a localhost HTTP helper
+sidecar/browser_server.py    headless Chromium behind a Unix socket (pages that need JavaScript)
 deploy/                      deploy script, systemd units, watchdog, ops runner, sentinel
 scripts/                     live checks against the real services (see scripts/README.md)
 test/                        node:test suites

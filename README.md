@@ -16,6 +16,7 @@ Plain TypeScript on Node 24 (no build step), [grammY](https://grammy.dev), [pi](
 - **Reminders** (`/remind`, “grok, 提醒我們…”) confirmed with the time understood, with edit, pause/resume and 💤 snooze; **scheduled posts** the bot writes itself (`/schedule 每天早上8點 台北天氣`); a **time zone per chat** (`/tz`).
 - **Watches** (`/watch every 6h GPT-7 release`, “grok, GPT-7 發布的時候告訴我”): checked every few hours with web/X search, posted only when something is new; one-time events end the watch, every watch ends after 30 days.
 - **Saved requests** (`/skill add 早報 = …`, then “grok 早報” or `/schedule 每天8點 早報`): a chat's own shortcuts, such as a translator, fact-check or chat summary.
+- **Exact math, data and charts**: Grok runs Python (numpy, pandas, matplotlib, sympy) in a locked box with no network, for calculations, statistics, attached CSV/Excel files and charts (“grok 做个图表”), posted after the answer. Pages that need JavaScript are read with a headless browser that can't reach the server's own network. Tools like these load only when a question needs them, so ordinary answers stay fast.
 - **Polls** (“grok, 開個投票…”) and **notes** it always remembers (`/lm`, “grok, 記住…”). In groups, ones the AI suggests wait for the asker's ✅, so a web page can't talk it into posting or saving something.
 - **Privacy modes**: `strict` (default for new groups — nothing stored, each question answered on its own), `focused` (the group chat goes to the AI only for questions about it, like “grok tldr”, or when the AI asks to read it; follow-ups remember the last few answers; 1 day stored) or `normal` (recent chat with every question; the group's conversation with the bot keeps its last 20 questions from the past day; 7 days of chat log and notes). Keys, passwords, logins, emails, phone and card numbers in others' messages are hidden before anything goes to the AI.
 
@@ -40,6 +41,8 @@ Telegram ⇄ Local Bot API server (optional, 2 GB files)
           grokbot (Node)  ── pi-ai ──▶ xAI (chat, search, speech, images) · OpenAI · Anthropic
               │  SQLite: settings, notes, reminders, usage, permissions, credentials
               ├── ParseHub helper (Python, 127.0.0.1)  ── social media posts
+              ├── browser reader (Chromium, no LAN)     ── pages that need JavaScript
+              ├── bubblewrap box (no network)           ── run_code: Python for math, data, charts
               ├── yt-dlp + ffmpeg                       ── videos, subtitles, frames
               └── ops runner (root, fixed actions)      ── restart / update from /admin
 watchdog timer: restarts stopped or hung services · sentinel on a 2nd server: alerts if the VPS is down

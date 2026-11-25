@@ -10,7 +10,7 @@ From your machine:
 deploy/deploy.sh root@your-server            # add ssh options after the host, e.g. -i ~/.ssh/key
 ```
 
-This copies the code to `/opt/grokbot` (owned by root), creates the `grokbot` system user and `/var/lib/grokbot` (data, mode 700), installs yt-dlp and ParseHub in their own virtualenvs, and installs the systemd units. Run it again to update; it restarts the bot.
+This copies the code to `/opt/grokbot` (owned by root), creates the `grokbot` system user and `/var/lib/grokbot` (data, mode 700), installs yt-dlp and ParseHub in their own virtualenvs, bubblewrap and the `/opt/pysandbox` Python environment for `run_code`, Chromium for the browser reader, and installs the systemd units. Run it again to update; it restarts the bot.
 
 Then on the server:
 
@@ -28,6 +28,7 @@ Open a private chat with the bot and send `/login`, then `/admin`.
 |---|---|---|
 | `grokbot.service` | grokbot | The bot. `ProtectSystem=strict`, writes only `/var/lib/grokbot`, `MemoryMax=1G`. |
 | `grokbot-parsehub.service` | grokbot | ParseHub helper on `127.0.0.1:8765`. Outbound private, link-local and CGNAT addresses are blocked (`IPAddressDeny`), so share-link redirects can't reach internal services. |
+| `grokbot-browser.service` | dynamic user | Browser reader (headless Chromium) on the socket `/run/grokbot-browser/browser.sock`, for pages that need JavaScript. Loopback, private, link-local and CGNAT addresses are blocked (`IPAddressDeny`); only the DNS stub resolver is allowed. |
 | `yt-dlp-update.timer` | root | Daily `pip install --upgrade` of yt-dlp and ParseHub, then restarts the helper. |
 | `grokbot-watchdog.timer` | root | Every 2 min: restarts stopped services, restarts the bot if its heartbeat (`/var/lib/grokbot/heartbeat.json`) is older than 5 min, alerts the owner when something changes. |
 | `grokbot-ops.path` | root | Runs `deploy/grokbot-ops.sh` when the bot drops a request from `/admin → 🛠 Maintenance`. Only a fixed list of actions exists; requests are read and results written as `grokbot`, never as root. |

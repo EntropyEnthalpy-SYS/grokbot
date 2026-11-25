@@ -13,18 +13,21 @@ const TAVILY_EXTRACT_URL = "https://api.tavily.com/extract";
 export interface LinkContent {
   url: string;
   text: string;
-  source: "tavily" | "direct" | "cache";
+  source: "tavily" | "direct" | "browser" | "cache";
 }
 
 export class LinkReader {
   readonly #db: Db;
   readonly #tavilyKey: string | undefined;
   readonly #fetchImpl: typeof fetch;
+  readonly #browser: ((url: string, signal?: AbortSignal) => Promise<string>) | undefined;
 
-  constructor(options: { db: Db; tavilyKey?: string; fetchImpl?: typeof fetch }) {
+  /** `browser`: renders a page with JavaScript (the browser reader), tried last. */
+  constructor(options: { db: Db; tavilyKey?: string; fetchImpl?: typeof fetch; browser?: (url: string, signal?: AbortSignal) => Promise<string> }) {
     this.#db = options.db;
     this.#tavilyKey = options.tavilyKey;
     this.#fetchImpl = options.fetchImpl ?? fetch;
+    this.#browser = options.browser;
   }
 
   get hasTavily(): boolean {
@@ -59,6 +62,14 @@ export class LinkReader {
         result = { url, text: await this.#direct(url, signal), source: "direct" };
       } catch (error) {
         errors.push(`direct: ${(error as Error).message}`);
+      }
+    }
+    // Pages that need JavaScript or refuse simple fetches: a real browser, last because it's slowest.
+    if (!result && this.#browser) {
+      try {
+        result = { url, text: readableText(await this.#browser(url, signal)), source: "browser" };
+      } catch (error) {
+        errors.push(`browser: ${(error as Error).message}`);
       }
     }
     if (!result) throw new Error(`Couldn't read ${url} (${errors.join("; ")})`);
@@ -101,15 +112,22 @@ export class LinkReader {
   async #direct(url: string, signal?: AbortSignal): Promise<string> {
     const page = await safeFetch(url, { signal });
     if (page.status >= 400) throw new Error(`HTTP ${page.status}`);
-    if (/html|xml/i.test(page.contentType) || page.body.trimStart().startsWith("<")) {
-      const parsed = htmlToText(page.body);
-      const text = [parsed.title && `# ${parsed.title}`, parsed.description, parsed.text].filter(Boolean).join("\n\n");
-      if (text.length < 200) throw new Error("page has almost no readable text (it may need JavaScript)");
-      return text;
-    }
+    if (/html|xml/i.test(page.contentType) || page.body.trimStart().startsWith("<")) return readableText(page.body);
     if (/^text\//i.test(page.contentType) || /json/i.test(page.contentType)) return page.body;
     throw new Error(`unsupported content type ${page.contentType || "unknown"}`);
   }
+}
+
+/** "Just a moment…" and similar: the site checks for real visitors and shows no content to readers. */
+const BOT_CHECK = /<title>\s*(Just a moment|Attention Required|Checking your browser|Verifying you are human|请稍候|請稍候|DDoS-Guard)|challenge-platform|cf-chl-/i;
+
+/** The readable text of a page's HTML; throws when there's next to none, or only a bot check. */
+export function readableText(html: string): string {
+  if (BOT_CHECK.test(html.slice(0, 20_000))) throw new Error("the site shows a bot check (e.g. Cloudflare) instead of the page; it can't be read automatically");
+  const parsed = htmlToText(html);
+  const text = [parsed.title && `# ${parsed.title}`, parsed.description, parsed.text].filter(Boolean).join("\n\n");
+  if (text.length < 200) throw new Error("page has almost no readable text (it may need JavaScript)");
+  return text;
 }
 
 const MD_IMAGE = /!\[[^\]]*\]\([^)]*\)/g;

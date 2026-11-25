@@ -185,6 +185,21 @@ test("reader reports both failures when Tavily fails and the direct fetch is blo
   await assert.rejects(reader.read("http://127.0.0.1:1/x"), /tavily: Failed to retrieve content; direct: Blocked address/);
 });
 
+test("when Tavily and the direct fetch fail, the browser reader renders the page; a bot-check page is reported, not read", async () => {
+  const failing = () => fakeTavily([{ status: 200, body: { results: [], failed_results: [{ url: "u", error: "Failed to retrieve content" }] } }]).impl;
+  const article = `<html><head><title>渲染后的文章</title></head><body><main><p>${"正文内容需要 JavaScript 才会出现。".repeat(20)}</p></main></body></html>`;
+  const rendered: string[] = [];
+  const reader = new LinkReader({ db: openDbAt(":memory:"), tavilyKey: "k", fetchImpl: failing(), browser: async (url) => (rendered.push(url), article) });
+  const page = await reader.read("http://127.0.0.1:1/spa");
+  assert.equal(page.source, "browser");
+  assert.match(page.text, /^# 渲染后的文章[\s\S]*正文内容需要 JavaScript/);
+  assert.deepEqual(rendered, ["http://127.0.0.1:1/spa"]);
+
+  const check = '<html><head><title>Just a moment...</title></head><body><div id="challenge-platform"></div></body></html>';
+  const blocked = new LinkReader({ db: openDbAt(":memory:"), tavilyKey: "k", fetchImpl: failing(), browser: async () => check });
+  await assert.rejects(blocked.read("http://127.0.0.1:1/forum"), /browser: the site shows a bot check/);
+});
+
 test("content cards: pages go to Grok as untrusted data in the group's language; cached per language; failures not posted", async () => {
   const asks: { system: string; prompt: string; search?: boolean }[] = [];
   const grok = {

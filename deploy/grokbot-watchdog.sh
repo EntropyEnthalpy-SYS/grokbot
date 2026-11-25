@@ -36,7 +36,7 @@ send() {
 if [ "${1:-}" = "--test" ]; then send "🐕 grokbot watchdog test: alerts reach you."; exit 0; fi
 
 problems=()
-for unit in telegram-bot-api grokbot-tunnel grokbot-parsehub grokbot; do
+for unit in telegram-bot-api grokbot-tunnel grokbot-parsehub grokbot-browser grokbot; do
   [ -f "/etc/systemd/system/$unit.service" ] || continue
   if ! systemctl is-active --quiet "$unit"; then
     problems+=("$unit was $(systemctl is-active "$unit"); restarted it")

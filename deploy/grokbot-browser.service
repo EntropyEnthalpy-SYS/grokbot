@@ -1,0 +1,28 @@
+[Unit]
+Description=grokbot browser reader (renders pages that need JavaScript; public internet only)
+After=network-online.target
+Wants=network-online.target
+Before=grokbot.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+RuntimeDirectory=grokbot-browser
+RuntimeDirectoryMode=0755
+Environment=BROWSER_SOCKET=/run/grokbot-browser/browser.sock
+ExecStart=/usr/bin/python3 /opt/grokbot/sidecar/browser_server.py
+Restart=on-failure
+RestartSec=5
+
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+MemoryMax=1G
+TasksMax=512
+# Load-bearing SSRF defense: links are untrusted, and Chromium follows redirects and runs page scripts.
+# Nothing on this server (loopback) or on private networks is reachable; only the DNS stub resolver is.
+IPAddressAllow=127.0.0.53/32
+IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7
+
+[Install]
+WantedBy=multi-user.target
