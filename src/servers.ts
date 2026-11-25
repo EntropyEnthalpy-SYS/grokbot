@@ -109,12 +109,12 @@ export class ServerDesk {
   }
 
   /** Can the bot log in? A short, owner-facing answer with what to do when it can't. */
-  async test(server: Server): Promise<{ ok: boolean; text: string }> {
+  async test(server: Server): Promise<{ ok: boolean; text: string; needsKey?: boolean }> {
     const result = await this.exec(server, "echo ok; hostname; uptime -p 2>/dev/null || uptime", 25_000);
     if (result.exitCode === 0) return { ok: true, text: result.output.split("\n").slice(1).filter((l) => l.trim()).join(" · ") };
     const out = result.output;
     if (/Permission denied/i.test(out)) {
-      return { ok: false, text: "The server refused the bot's key. Paste the key line on it (logged in as that user). If you already did, key login may be off there: run sudo sed -i 's/^#\\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config && sudo systemctl reload ssh" };
+      return { ok: false, needsKey: true, text: "The server doesn't accept the bot's key yet." };
     }
     if (/REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed/i.test(out)) {
       return { ok: false, text: "The server's identity changed since the bot first connected (reinstalled? or someone in between). Remove and re-add it only if you know why." };

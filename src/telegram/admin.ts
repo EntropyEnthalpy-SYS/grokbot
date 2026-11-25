@@ -821,6 +821,17 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
     if (test) {
       const result = await deps.servers.test(server);
       lines.push("", `${result.ok ? "✅ Connected" : "❌ Can't log in"}: ${escapeHtml(result.text)}`);
+      if (result.needsKey) {
+        lines.push(
+          "",
+          `1. Log in to ${escapeHtml(server.host)} as <b>${escapeHtml(server.user)}</b> the usual way (SSH app or your provider's web console; password is fine).`,
+          "2. Paste this line and press Enter (tap it to copy):",
+          `<pre>${escapeHtml(await deps.servers.installLine())}</pre>`,
+          "3. Tap 🔌 Test again.",
+          "",
+          "<i>Already pasted it and still refused? Key login is off on that server: run</i> <code>sed -i 's/^#\\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config &amp;&amp; systemctl reload ssh</code>",
+        );
+      }
     }
     const keyboard = new InlineKeyboard()
       .text("🔌 Test", `adm:srvt:${id}`)
