@@ -1,6 +1,7 @@
 import { ChatSessions } from "./agent/sessions.ts";
 import { FileDesk } from "./agent/files.ts";
 import { CodeDesk, CodeRunner } from "./agent/sandbox.ts";
+import { ServerDesk } from "./servers.ts";
 import { groupChatTool, readLinkTool, searchChatTool, watchVideoTool } from "./agent/tools.ts";
 import { ImageStudio } from "./agent/images.ts";
 import { MemoryStore } from "./memory.ts";
@@ -49,6 +50,8 @@ export interface App {
   files: FileDesk;
   /** run_code: Python in a locked box (when bubblewrap and the Python environment are installed). */
   code: CodeDesk;
+  /** The owner's servers, worked on over SSH from the owner's private chat. */
+  servers: ServerDesk;
   memory: MemoryStore;
   polls: PollDesk;
   /** AI-suggested notes and polls waiting for a person's ✅ (groups with confirmations on). */
@@ -74,6 +77,8 @@ export function createApp(options: {
   /** The browser reader's socket (default /run/grokbot-browser/browser.sock; unused when it isn't running). */
   browserSocket?: string;
   fontDir?: string;
+  /** The owner: server_run is offered only in their private chat. */
+  ownerId?: number;
 }): App {
   if (!authRetryInstalled) {
     installAuthRetry();
@@ -96,6 +101,7 @@ export function createApp(options: {
   const images = new ImageStudio((request) => grok.createImage(request), () => limits.get("imagesPerUserDay"));
   const polls = new PollDesk();
   const files = new FileDesk();
+  const servers = new ServerDesk(db, options.dataDir);
   const code = new CodeDesk(
     new CodeRunner({ venv: options.sandboxVenv ?? "/opt/pysandbox", workRoot: join(options.dataDir, "sandbox"), fontDir: options.fontDir }),
   );
@@ -130,16 +136,23 @@ export function createApp(options: {
       ...(code.available
         ? [{ name: "code", about: "run_code: run Python for exact math, statistics, data files (CSV/Excel) and charts", when: CODE_WORDS, tools: [code.tool(key)] }]
         : []),
+      ...(options.ownerId !== undefined && key === `tg:${options.ownerId}`
+        ? [{ name: "server", about: "server_run: run shell commands on the owner's servers over SSH (check, diagnose, fix)", when: SERVER_WORDS, tools: [servers.tool(key)] }]
+        : []),
     ],
     systemExtra: (key) =>
       `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + scriptBlock(groups, chatIdOf(key)) + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key), speakers.get(key)),
   });
-  return { db, grok, sessions, groups, reader, video, parsehub, images, files, code, memory, speakers, polls, actions, limits };
+  return { db, grok, sessions, groups, reader, video, parsehub, images, files, code, servers, memory, speakers, polls, actions, limits };
 }
 
 /** Questions that want a file or a poll load those tools up front (the model can still load them itself). */
 const FILE_WORDS = /文件|檔案|档案|附件|下载|下載|导出|導出|匯出|\.(md|csv|docx|txt|json|ya?ml|sh|py)\b|\b(file|download|export|markdown)\b/i;
 const POLL_WORDS = /投票|表决|表決|\b(poll|vote)\b/i;
+/** The owner talking about their servers. */
+const SERVER_WORDS =
+  /服务器|服務器|伺服器|主机|主機|\bvps\b|\bserver|\bssh\b|磁盘|磁碟|硬盘|硬碟|内存|記憶體|\bcpu\b|负载|負載|\bnginx\b|\bdocker\b|systemctl|日志|日誌|\blogs?\b|重启|重啟|\brestart\b|进程|進程|端口|\bport\b|防火墙|防火牆|证书|證書|\b(disk|memory|uptime|service)\b/i;
+
 /** Math, statistics, data files and charts (not "画一张图", which is create_image). */
 const CODE_WORDS =
   /计算|計算|算一下|算算|算出|统计|統計|平均|中位数|中位數|方差|标准差|標準差|概率|機率|几率|復利|复利|回归|迴歸|图表|圖表|折线图|折線圖|柱状图|柱狀圖|饼图|圓餅圖|曲线图|曲線圖|表格|excel|xlsx|csv|python|代码|代碼|\b(calculate|compute|statistics|average|median|chart|plot|graph|regression|spreadsheet)\b/i;

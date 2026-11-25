@@ -81,7 +81,8 @@ const PANEL = `<b>🗂 The panel</b>
 • ⚖️ <b>Limits</b>: ➖/➕ per limit, ⭐ trusted members
 • 🔐 <b>Permissions</b>: per person 💬 private chat · ✅ approved · ⭐ trusted · ⛔ blocked; ➕ add people
 • 📊 <b>Status</b> · 🩺 <b>Health</b>
-• 🛠 <b>Maintenance</b>: status · recent errors · update · restart · 💾 backup · 🍪 site cookies`;
+• 🛠 <b>Maintenance</b>: status · recent errors · update · restart · 💾 backup · 🍪 site cookies
+• 🖥 <b>Servers</b>: your VPSs the AI may check and fix over SSH (in this private chat): ➕ add · 🔌 test · 📜 recent commands`;
 
 const TASKS = `<b>🧭 Common tasks</b>
 • <b>A friend wants to chat privately</b> → 🔐 Permissions → ➕ Add people, or tap ✅ Allow on their access request
@@ -91,7 +92,8 @@ const TASKS = `<b>🧭 Common tasks</b>
 • <b>Grok quota ran out</b> → 🤖 AI providers: sign in to ChatGPT or Claude as a fallback
 • <b>Instagram / Threads / Zhihu links fail</b> → 🛠 Maintenance → 🍪 Site cookies
 • <b>Something seems broken</b> → 🩺 Health, then 🛠 Maintenance → Recent errors or Restart
-• <b>Clear what the bot remembers</b> → <code>/forget</code> in that chat`;
+• <b>Clear what the bot remembers</b> → <code>/forget</code> in that chat
+• <b>Check or fix a server</b> → add it once in 🖥 Servers, then ask here: <code>LA 的磁盘和内存怎么样？</code> · <code>HK 的 nginx 为什么挂了？</code>. Changes wait for your ✅`;
 
 export const GUIDE: readonly GuidePage[] = [
   { id: "talk", button: "💬 Talking to the bot", html: TALK },

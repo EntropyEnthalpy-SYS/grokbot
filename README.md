@@ -32,6 +32,7 @@ Plain TypeScript on Node 24 (no build step), [grammY](https://grammy.dev), [pi](
 | 📈 Usage · ⚖️ Limits | Usage per member, chat and provider, with day-by-day charts; adjustable per-member and per-group limits. |
 | 📊 Status · 🩺 Health | Logins, quota, live checks of every dependency. |
 | 🛠 Maintenance | Service status, recent errors, update yt-dlp/ParseHub, restart, backup (without logins) — no SSH needed. |
+| 🖥 Servers | Your servers the AI may work on over SSH from your private chat (“LA 的磁盘怎么样？”). The bot logs in with its own key (you paste one line on each server; no passwords stored). Commands that only look run at once; anything that changes the server waits for your ✅. Every command is logged. |
 
 ## Architecture
 
@@ -77,6 +78,7 @@ All settings are environment variables; see [`.env.example`](.env.example). Only
 - Stored: settings, notes, reminders, usage counts (no content), permissions, provider logins, the last 7 days of private conversations with the bot and the last day (up to 20 questions) of a group's conversation with it (older turns are dropped even while a chat stays active), and 7 days of group messages in `normal` groups. `strict` groups store neither. `/forget` deletes a chat's data; `/disable` removes a group.
 - `strict` groups store no messages and send Grok only the question and the message it replies to.
 - Backups from `/admin` exclude logins and API keys.
+- 🖥 Servers: command output goes to the AI provider after secret-looking lines (keys, passwords, tokens) are hidden; reading key and password files always needs your ✅. The bot's SSH key is in `/var/lib/grokbot/ssh/`.
 - Requests are sent with `store: false`. Check your provider's data settings (e.g. grok.com → Settings → Data Controls).
 
 ## About using subscriptions

@@ -10,6 +10,7 @@ import { formatLocalTime } from "../reminders.ts";
 import { findTimeZone, formatLocalTime as formatInZone, timeZone, zoneLabel } from "../time.ts";
 import { escapeAttr, escapeHtml } from "./format.ts";
 import { GUIDE } from "./guide.ts";
+import type { ServerDesk } from "../servers.ts";
 import { LANGUAGES, LINK_MODES, PRIVACY_MODES, type GroupStore } from "./groups.ts";
 
 const MODELS_PER_PAGE = 8;
@@ -43,6 +44,8 @@ export interface AdminDeps {
   backup?: () => string;
   /** Site cookies for Instagram, Threads, Zhihu… (read by the ParseHub helper). */
   cookies?: CookieStore;
+  /** The owner's servers the AI may work on over SSH. */
+  servers?: ServerDesk;
 }
 
 const KIND_LABELS: Record<string, string> = { question: "❓", image: "🖼", tr: "🌐", voice_sec: "🎙 min", card: "🔗", tts: "🔊", watch: "👀" };
@@ -267,6 +270,22 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
       case "gpc":
         groups.setPersona(Number(a), "");
         return groupDetail(Number(a));
+      case "srv":
+        return serversScreen();
+      case "srvi":
+        return serverDetail(Number(a));
+      case "srvt":
+        return serverDetail(Number(a), true);
+      case "srvk":
+        void sendKeyLine(ctx);
+        return undefined;
+      case "srva":
+        void askServer(ctx);
+        return undefined;
+      case "srvd":
+        return removeServer(Number(a), b === "y");
+      case "srvl":
+        return serverLog();
       case "hl":
         return { text: await renderHealth(health), keyboard: new InlineKeyboard().text("🔄 Run again", "adm:hl").text("⬅️ Back", "adm:home") };
       default:
@@ -295,6 +314,7 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
       .text("🔐 Permissions", "adm:perm")
       .text("🛠 Maintenance", "adm:ops")
       .row()
+      .text("🖥 Servers", "adm:srv")
       .text("📖 Guide", "adm:guide");
     return { text: lines.join("\n"), keyboard };
   }
@@ -773,6 +793,103 @@ export function installAdmin(bot: Bot, deps: AdminDeps): void {
     if (!zone) return void (await ctx.reply(`I don't know the time zone "${text}". Tap 🕒 Time zone again to retry.`));
     groups.setTimeZone(chatId, reset ? "" : zone);
     await ctx.reply(`🕒 ${group.title}: ${zone}, now ${formatInZone(Date.now(), zone)}. New reminders use it.`);
+  }
+
+  function serversScreen(): Screen {
+    const keyboard = new InlineKeyboard();
+    const list = deps.servers?.list() ?? [];
+    for (const s of list) keyboard.text(`🖥 ${s.name} · ${s.user}@${s.host}`, `adm:srvi:${s.id}`).row();
+    keyboard.text("➕ Add server", "adm:srva").text("📜 Recent commands", "adm:srvl").row().text("⬅️ Back", "adm:home");
+    return {
+      text: [
+        "<b>🖥 Servers</b>",
+        "Ask about these servers in this private chat (e.g. <i>LA 的磁盘和内存怎么样？</i>, <i>why is nginx down on HK?</i>) and the AI logs in over SSH to check and fix.",
+        "• Commands that only look run at once; anything that changes the server waits for your ✅.",
+        "• The bot logs in with its own key. No passwords are stored or typed here.",
+        "• Command output, with secret-looking lines hidden, goes to the AI provider. Only your private chat can use this.",
+        "",
+        list.length ? `${list.length} server(s):` : "No servers yet.",
+      ].join("\n"),
+      keyboard,
+    };
+  }
+
+  async function serverDetail(id: number, test = false): Promise<Screen> {
+    const server = deps.servers?.list().find((s) => s.id === id);
+    if (!server || !deps.servers) return serversScreen();
+    const lines = [`<b>🖥 ${escapeHtml(server.name)}</b>`, `<code>${escapeHtml(`${server.user}@${server.host}`)}</code> port ${server.port}`];
+    if (test) {
+      const result = await deps.servers.test(server);
+      lines.push("", `${result.ok ? "✅ Connected" : "❌ Can't log in"}: ${escapeHtml(result.text)}`);
+    }
+    const keyboard = new InlineKeyboard()
+      .text("🔌 Test", `adm:srvt:${id}`)
+      .text("🔑 Key line", "adm:srvk")
+      .row()
+      .text("🗑 Remove", `adm:srvd:${id}`)
+      .text("⬅️ Servers", "adm:srv");
+    return { text: lines.join("\n"), keyboard };
+  }
+
+  function removeServer(id: number, confirmed: boolean): Screen {
+    const server = deps.servers?.list().find((s) => s.id === id);
+    if (!server || !deps.servers) return serversScreen();
+    if (confirmed) {
+      deps.servers.remove(id);
+      const screen = serversScreen();
+      return { ...screen, text: `🗑 Removed ${escapeHtml(server.name)}. To also lock the bot out, delete its line (ending in <code>grokbot@…</code>) from <code>~/.ssh/authorized_keys</code> on that server.\n\n${screen.text}` };
+    }
+    return {
+      text: `Remove <b>${escapeHtml(server.name)}</b> (${escapeHtml(server.host)}) from the list? The AI can no longer use it.`,
+      keyboard: new InlineKeyboard().text("🗑 Yes, remove", `adm:srvd:${id}:y`).text("⬅️ No", `adm:srvi:${id}`),
+    };
+  }
+
+  function serverLog(): Screen {
+    const rows = deps.servers?.recent() ?? [];
+    const icon: Record<string, string> = { "read-only": "👁", approved: "✅", declined: "❌" };
+    const lines = rows.map(
+      (r) =>
+        `${icon[r.approved] ?? "•"} ${formatLocalTime(r.at).slice(5)} <b>${escapeHtml(r.server)}</b> <code>${escapeHtml(r.command.length > 120 ? `${r.command.slice(0, 120)}…` : r.command)}</code>${r.exitCode !== null && r.exitCode !== 0 ? ` (exit ${r.exitCode})` : ""}`,
+    );
+    return {
+      text: ["<b>📜 Recent server commands</b>", "👁 only looked · ✅ you approved · ❌ declined or unanswered", "", ...(lines.length ? lines : ["None yet."])].join("\n"),
+      keyboard: new InlineKeyboard().text("🔄 Refresh", "adm:srvl").text("⬅️ Servers", "adm:srv"),
+    };
+  }
+
+  async function sendKeyLine(ctx: Context): Promise<void> {
+    if (!deps.servers) return;
+    await ctx.reply(
+      [
+        "Log in to the server as the user you added (your usual password login is fine), paste this line and press Enter. It lets the bot's key in; nothing else changes.",
+        `<pre>${escapeHtml(await deps.servers.installLine())}</pre>`,
+        "Then tap 🔌 Test.",
+      ].join("\n"),
+      { parse_mode: "HTML" },
+    );
+  }
+
+  async function askServer(ctx: Context): Promise<void> {
+    if (!deps.servers) return;
+    await ctx.reply(
+      "Send the server as <code>name address [port] [user]</code>, e.g.\n<code>HK 203.0.113.10 22 root</code>\nThe name is what you'll call it when asking. Don't send a password.\n\n/cancel to stop.",
+      { parse_mode: "HTML" },
+    );
+    const text = await new Promise<string>((resolve) => (pendingInput = { resolve }));
+    if (!text) return void (await ctx.reply("No server added."));
+    const added = deps.servers.add(text);
+    if (typeof added === "string") return void (await ctx.reply(`❌ ${added} Tap ➕ Add server to try again.`));
+    await ctx.reply(
+      [
+        `🖥 <b>${escapeHtml(added.name)}</b> added (${escapeHtml(`${added.user}@${added.host}`)} port ${added.port}).`,
+        "",
+        `Last step: log in to it as <b>${escapeHtml(added.user)}</b> (your usual password login is fine), paste this line and press Enter. It lets the bot's key in; nothing else changes.`,
+        `<pre>${escapeHtml(await deps.servers.installLine())}</pre>`,
+        "Then tap 🔌 Test.",
+      ].join("\n"),
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔌 Test", `adm:srvt:${added.id}`).text("🖥 Servers", "adm:srv") },
+    );
   }
 
   async function status(): Promise<Screen> {

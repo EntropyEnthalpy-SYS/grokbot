@@ -70,6 +70,7 @@ import { AlbumCollector } from "./albums.ts";
 import { installPuck } from "./puck.ts";
 import type { FileDesk } from "../agent/files.ts";
 import type { CodeDesk, SandboxFile } from "../agent/sandbox.ts";
+import type { Approver, Server, ServerDesk } from "../servers.ts";
 import { editParagraphs, openForEdit, wantsEditedFile } from "../media/edit.ts";
 import { isReadableDocument } from "../media/documents.ts";
 import { RateLimiter } from "./rateLimit.ts";
@@ -168,6 +169,8 @@ export interface BotDeps {
   files: FileDesk;
   /** run_code (Python in a locked box); its charts and files are posted after the answer. */
   code?: CodeDesk;
+  /** The owner's servers (server_run in the owner's private chat); changing commands wait for ✅ here. */
+  servers?: ServerDesk;
   memory: MemoryStore;
   usage: UsageStore;
   limits: LimitStore;
@@ -245,6 +248,7 @@ export function createBot({
   images,
   files,
   code,
+  servers,
   memory,
   speakers,
   usage,
@@ -332,6 +336,46 @@ export function createBot({
         await ctx.answerCallbackQuery({ text: `⚠️ ${errorMessage(error)}`.slice(0, 200), show_alert: true });
         await finish(`${action.preview}\n<i>⚠️ Failed: ${escapeHtml(errorMessage(error))}</i>`);
       }
+    });
+  }
+
+  // server_run wants to change a server: the command with ✅ Run / ❌ Cancel in the owner's chat, for 5 minutes.
+  const serverAsks = new Map<string, (outcome: "run" | "cancel") => void>();
+  const askToRun = async (server: Server, command: string, signal?: AbortSignal): Promise<boolean> => {
+    const id = randomUUID().slice(0, 8);
+    const shown = `🖥 <b>${escapeHtml(server.name)}</b> (${escapeHtml(`${server.user}@${server.host}`)})\n<pre>${escapeHtml(command)}</pre>`;
+    const sent = await bot.api.sendMessage(ownerId, `${shown}\nRun this?`, {
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "✅ Run", callback_data: `srv:y:${id}` }, { text: "❌ Cancel", callback_data: `srv:n:${id}` }]] },
+    });
+    const outcome = await new Promise<"run" | "cancel" | "expired" | "stopped">((resolve) => {
+      const finish = (result: "run" | "cancel" | "expired" | "stopped") => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", stop);
+        serverAsks.delete(id);
+        resolve(result);
+      };
+      const stop = () => finish("stopped");
+      const timer = setTimeout(() => finish("expired"), 5 * 60_000);
+      if (signal?.aborted) return finish("stopped");
+      signal?.addEventListener("abort", stop, { once: true });
+      serverAsks.set(id, finish);
+    });
+    const note = { run: "✅ Running…", cancel: "❌ Cancelled, not run.", expired: "⌛ No answer in 5 minutes, not run.", stopped: "⏹ Answer stopped, not run." }[outcome];
+    await bot.api.editMessageText(ownerId, sent.message_id, `${shown}\n<i>${note}</i>`, { parse_mode: "HTML" }).catch(() => undefined);
+    return outcome === "run";
+  };
+  if (servers) {
+    bot.callbackQuery(/^srv:(y|n):(\w+)$/, async (ctx) => {
+      if (!isOwner(ctx)) return ctx.answerCallbackQuery({ text: "Owner only." });
+      const [, choice, id] = ctx.match as RegExpMatchArray;
+      const waiting = serverAsks.get(id!);
+      if (!waiting) {
+        await ctx.answerCallbackQuery({ text: "This request expired." });
+        return ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => undefined);
+      }
+      await ctx.answerCallbackQuery();
+      waiting(choice === "y" ? "run" : "cancel");
     });
   }
 
@@ -500,6 +544,7 @@ export function createBot({
     ops,
     backup,
     cookies,
+    servers,
   });
 
   // Owner-only commands. In groups, others get a short refusal.
@@ -1922,6 +1967,9 @@ export function createBot({
     let imageTurn: ReturnType<ImageStudio["begin"]> | undefined;
     let fileTurn: ReturnType<FileDesk["begin"]> | undefined;
     let codeTurn: ReturnType<CodeDesk["begin"]> | undefined;
+    // The owner's private chat may run server commands; this turn's own approver, so cleanup removes only ours.
+    const serverTurn: Approver | undefined =
+      servers && ctx.chat!.type === "private" && chatId === ownerId ? (server, command, signal) => askToRun(server, command, signal) : undefined;
     let toolsUsed = false;
     // This turn's author for the remember tool. The next question in the chat may start before this
     // one's cleanup runs, so cleanup removes only our own entry.
@@ -1941,6 +1989,7 @@ export function createBot({
             imageTurn = images.begin(target.key, { userId: ctx.from?.id, unlimited: isOwner(ctx), attached: input.images });
             fileTurn = files.begin(target.key);
             codeTurn = code?.begin(target.key, attachedFiles(target.attached ?? []));
+            if (serverTurn) servers?.begin(target.key, serverTurn);
             speakers.set(target.key, speaker);
           },
           onText: (text) => {
@@ -1990,6 +2039,7 @@ export function createBot({
         `answer timing ${chatId}: queued ${secs(asked, began)}, first text ${secs(began, firstText)}, total ${secs(began, Date.now())}, steps ${steps.join(" ") || "none"}`,
       );
       if (speakers.get(target.key) === speaker) speakers.delete(target.key);
+      if (serverTurn) servers?.end(target.key, serverTurn);
       const created = imageTurn ? images.end(imageTurn) : [];
       await postImages(ctx.chat!.id, created, target.replyTo, target.threadId).catch(async (error) => {
         await ctx.reply(`⚠️ Couldn't post the image: ${errorMessage(error)}`).catch(() => undefined);

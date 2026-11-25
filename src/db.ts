@@ -140,6 +140,23 @@ export function openDbAt(path: string): Db {
       at        INTEGER NOT NULL,
       PRIMARY KEY (chat_id, thread_id)
     );
+    -- The owner's servers the AI may work on over SSH (owner's private chat only), and every command it ran.
+    CREATE TABLE IF NOT EXISTS servers (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      name     TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      host     TEXT NOT NULL,
+      port     INTEGER NOT NULL DEFAULT 22,
+      user     TEXT NOT NULL DEFAULT 'root',
+      added_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS server_log (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      at        INTEGER NOT NULL,
+      server    TEXT NOT NULL,
+      command   TEXT NOT NULL,
+      approved  TEXT NOT NULL,
+      exit_code INTEGER
+    );
     -- Extracted page text and generated summaries, keyed by normalized URL.
     CREATE TABLE IF NOT EXISTS link_cache (
       url        TEXT PRIMARY KEY,
