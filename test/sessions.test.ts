@@ -615,3 +615,54 @@ test("a reply that stops making progress is given up as an error; a slow tool of
   assert.equal(watched.stopReason, "stop");
   assert.equal((watched.content[0] as { text: string }).text, "影片講的是…");
 });
+
+test("tool sets: loaded when the question's words call for them, or by the model through load_tools mid-answer", { timeout: 5000 }, async () => {
+  const { getCurrentTools } = await import("@earendil-works/pi-ai");
+  const offered: string[][] = [];
+  let script: { tool?: string; args?: Record<string, unknown>; text?: string }[] = [];
+  let step = 0;
+  const grok = {
+    model: () => model,
+    streamFn: (_model: unknown, context: { messages: { role: string }[] }) => {
+      offered.push(getCurrentTools(context.messages).map((t) => t.name).sort());
+      const next = script[step++] ?? { text: "done" };
+      const stream = createAssistantMessageEventStream();
+      const content = next.tool ? [{ type: "toolCall", id: `fc_${step}`, name: next.tool, arguments: next.args ?? {} }] : [{ type: "text", text: next.text }];
+      const message = { role: "assistant", content, api: model.api, provider: model.provider, model: model.id, usage: zero, stopReason: next.tool ? "toolUse" : "stop", timestamp: Date.now() } as unknown as AssistantMessage;
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: { ...message, content: [] } });
+        stream.push({ type: "done", reason: message.stopReason as "stop", message });
+      });
+      return stream;
+    },
+  };
+  const ran: string[] = [];
+  const tool = (name: string) => ({ name, label: name, description: name, parameters: { type: "object", properties: {} }, execute: async () => (ran.push(name), { content: [{ type: "text", text: "ok" }], details: undefined }) });
+  const sessions = new ChatSessions({
+    db: openDbAt(":memory:"),
+    grok: grok as never,
+    systemPrompt: () => "",
+    tools: () => [tool("read_link") as never],
+    toolSets: () => [
+      { name: "poll", about: "polls", when: /投票/, tools: [tool("create_poll") as never] },
+      { name: "code", about: "run Python", tools: [tool("run_code") as never] },
+    ],
+  });
+
+  script = [{ text: "好的" }];
+  await sessions.run("tg:-1", { text: "開個投票" });
+  assert.deepEqual(offered[0], ["create_poll", "load_tools", "read_link"], "the question's words load the poll set; code is only offered through load_tools");
+
+  // Same chat, next question: the poll set is gone again; the model loads code and uses it in the same answer.
+  offered.length = 0;
+  step = 0;
+  script = [{ tool: "load_tools", args: { sets: ["code"] } }, { tool: "run_code" }, { text: "結果是 42" }];
+  const reply = await sessions.run("tg:-1", { text: "幫我精確算一下" });
+  assert.deepEqual(offered, [
+    ["load_tools", "read_link"],
+    ["load_tools", "read_link", "run_code"], // load_tools stays: the poll set can still be loaded
+    ["load_tools", "read_link", "run_code"],
+  ]);
+  assert.deepEqual(ran, ["run_code"]);
+  assert.equal((reply.content[0] as { text: string }).text, "結果是 42");
+});

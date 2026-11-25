@@ -104,20 +104,27 @@ export function createApp(options: {
       readLinkTool(reader, parsehub),
       watchVideoTool(video, () => preferredLanguage(groups, key), parsehub),
       images.tool(key),
-      files.tool(key),
       memory.tool(chatIdOf(key), () => speakers.get(key), confirmFor(key)),
-      polls.tool(key, confirmFor(key)),
       ...(search.available ? [searchWebTool(search)] : []),
       // Focused groups: the chat only when Grok decides a question needs it.
       ...(groups.privacy(chatIdOf(key)) === "focused" ? [groupChatTool(groups, chatIdOf(key), threadOf(key), () => groups.list().find((g) => g.chatId === chatIdOf(key))?.title)] : []),
       // Groups that keep their chat: earlier messages on request, only the matching ones.
       ...(chatIdOf(key) < 0 && groups.privacy(chatIdOf(key)) !== "strict" ? [searchChatTool(groups, chatIdOf(key), () => groups.timeZone(chatIdOf(key)))] : []),
     ],
+    // Offered only when a question needs them: fewer tools per request keep ordinary answers fast.
+    toolSets: (key) => [
+      { name: "files", about: "send_file: send the user a file (Markdown, text, code, config, CSV, Word)", when: FILE_WORDS, tools: [files.tool(key)] },
+      { name: "poll", about: "create_poll: post a Telegram poll in this chat", when: POLL_WORDS, tools: [polls.tool(key, confirmFor(key))] },
+    ],
     systemExtra: (key) =>
       `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + scriptBlock(groups, chatIdOf(key)) + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key), speakers.get(key)),
   });
   return { db, grok, sessions, groups, reader, video, parsehub, images, files, memory, speakers, polls, actions, limits };
 }
+
+/** Questions that want a file or a poll load those tools up front (the model can still load them itself). */
+const FILE_WORDS = /文件|檔案|档案|附件|下载|下載|导出|導出|匯出|\.(md|csv|docx|txt|json|ya?ml|sh|py)\b|\b(file|download|export|markdown)\b/i;
+const POLL_WORDS = /投票|表决|表決|\b(poll|vote)\b/i;
 
 /** The group's Chinese script (/lang zh-cn or zh-tw): cards use it, so answers in Chinese should too. */
 function scriptBlock(groups: GroupStore, chatId: number): string {

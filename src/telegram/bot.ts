@@ -1903,24 +1903,34 @@ export function createBot({
     // This turn's author for the remember tool. The next question in the chat may start before this
     // one's cleanup runs, so cleanup removes only our own entry.
     const speaker = { userId: ctx.from?.id, userName: displayName(ctx.from) };
+    // Where answers spend their time (journal only, no message content): waiting in line, until the first text, in total.
+    const asked = Date.now();
+    let began = 0;
+    let firstText = 0;
+    const steps: string[] = [];
     try {
       const reply = await sessions.run(
         target.key,
         input,
         {
           onStart: () => {
+            began = Date.now();
             imageTurn = images.begin(target.key, { userId: ctx.from?.id, unlimited: isOwner(ctx), attached: input.images });
             fileTurn = files.begin(target.key);
             speakers.set(target.key, speaker);
           },
           onText: (text) => {
+            firstText ||= Date.now();
             typing.stop();
             streamer.update(text);
           },
           onTool: () => {
             toolsUsed = true;
           },
-          onActivity: (name) => streamer.status(activityLine(name)),
+          onActivity: (name) => {
+            steps.push(`${name}@${((Date.now() - (began || asked)) / 1000).toFixed(1)}s`);
+            streamer.status(activityLine(name));
+          },
         },
         { ephemeral: target.ephemeral, history: target.history },
       );
@@ -1951,6 +1961,10 @@ export function createBot({
       ids = await streamer.fail(error instanceof TurnCancelledError ? "Stopped." : friendlyError(errorMessage(error), grok.route, isOwner(ctx)));
     } finally {
       typing.stop();
+      const secs = (from: number, to: number) => (from && to ? `${((to - from) / 1000).toFixed(1)}s` : "-");
+      console.log(
+        `answer timing ${chatId}: queued ${secs(asked, began)}, first text ${secs(began, firstText)}, total ${secs(began, Date.now())}, steps ${steps.join(" ") || "none"}`,
+      );
       if (speakers.get(target.key) === speaker) speakers.delete(target.key);
       const created = imageTurn ? images.end(imageTurn) : [];
       await postImages(ctx.chat!.id, created, target.replyTo, target.threadId).catch(async (error) => {

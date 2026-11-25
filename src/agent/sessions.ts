@@ -1,5 +1,5 @@
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, ToolResultMessage } from "@earendil-works/pi-ai";
+import { Type, type AssistantMessage, type ImageContent, type ToolResultMessage } from "@earendil-works/pi-ai";
 import type { Db } from "../db.ts";
 import { isServerSideToolCall, serverSearchStarted, stripServerSideToolCalls, type Grok } from "../grok/grok.ts";
 import { SentStore } from "./sent.ts";
@@ -46,6 +46,18 @@ export class TurnCancelledError extends Error {
   }
 }
 
+/**
+ * Tools offered only when a question needs them, so ordinary questions stay fast: loaded up front
+ * when the question's words match `when`, or by the model through load_tools.
+ */
+export interface ToolSet {
+  name: string;
+  /** One line for load_tools: what the set is for. */
+  about: string;
+  when?: RegExp;
+  tools: AgentTool[];
+}
+
 export interface TurnHandlers {
   /** Runs when the turn actually starts (after earlier turns of the same chat finished). */
   onStart?: () => void;
@@ -66,6 +78,9 @@ export class ChatSessions {
   readonly #grok: Grok;
   readonly #systemPrompt: (chatKey: string) => string;
   readonly #tools: (chatKey: string) => AgentTool[];
+  readonly #toolSets: (chatKey: string) => ToolSet[];
+  /** The running turn's tools, picked up before each request (load_tools adds to them mid-turn). */
+  readonly #turnTools = new Map<string, () => AgentTool[]>();
   readonly #systemExtra: (chatKey: string) => string;
   readonly #retentionMs: number;
   readonly #agents = new Map<string, Agent>();
@@ -92,6 +107,7 @@ export class ChatSessions {
     grok: Grok;
     systemPrompt: (chatKey: string) => string;
     tools?: (chatKey: string) => AgentTool[];
+    toolSets?: (chatKey: string) => ToolSet[];
     /** Appended to the system prompt on every request (e.g. the chat's saved notes); never stored. */
     systemExtra?: (chatKey: string) => string;
     retentionMs?: number;
@@ -102,6 +118,7 @@ export class ChatSessions {
     this.#grok = options.grok;
     this.#systemPrompt = options.systemPrompt;
     this.#tools = options.tools ?? (() => []);
+    this.#toolSets = options.toolSets ?? (() => []);
     this.#systemExtra = options.systemExtra ?? (() => "");
     this.#retentionMs = options.retentionMs ?? CONVERSATION_RETENTION_MS;
     this.#stallMs = options.stallMs ?? STALL_MS;
@@ -207,7 +224,18 @@ export class ChatSessions {
     const agent = ephemeral ? this.#newAgent(chatKey, []) : (this.#agents.get(chatKey) ?? this.#newAgent(chatKey, this.#load(chatKey)));
     // Pick up /model, /route and /privacy changes (which tools the chat may use) made since the agent was created.
     agent.state.model = this.#grok.model();
-    agent.state.tools = this.#tools(chatKey);
+    const sets = this.#toolSets(chatKey);
+    const loaded = new Set(sets.filter((set) => set.when?.test(input.text)).map((set) => set.name));
+    const turnTools = () => {
+      const missing = sets.filter((set) => !loaded.has(set.name));
+      return [
+        ...this.#tools(chatKey),
+        ...sets.filter((set) => loaded.has(set.name)).flatMap((set) => set.tools),
+        ...(missing.length ? [loadToolsTool(missing, loaded)] : []),
+      ];
+    };
+    agent.state.tools = turnTools();
+    this.#turnTools.set(chatKey, turnTools);
     agent.state.messages = dropOldImages(dropExpired(agent.state.messages, Date.now() - this.#retentionMs));
     // Only what is sent is limited; the stored conversation keeps older turns for replies to old answers.
     if (options.history) this.#windows.set(chatKey, options.history);
@@ -278,6 +306,9 @@ export class ChatSessions {
       const unfinished = (!firstText && toolsUsed.size === 0) || isBarePromise(firstText);
       const claim = unfinished ? undefined : falseClaim(firstText, toolsUsed);
       if (first?.stopReason === "stop" && (unfinished || claim)) {
+        // "文件在上面" with send_file not loaded: every tool is there for the second try.
+        for (const set of sets) loaded.add(set.name);
+        agent.state.tools = turnTools();
         await agent.prompt(claim ? claim.note : FINISH_NOW);
         afterLastSearch();
         // Keep the conversation as question → answer: the promise and the note go, the question's photos stay the latest.
@@ -293,6 +324,7 @@ export class ChatSessions {
       clearTimeout(stallTimer);
       if (this.#onSearch.get(chatKey) === onSearch) this.#onSearch.delete(chatKey);
       if (this.#onStream.get(chatKey) === alive) this.#onStream.delete(chatKey);
+      if (this.#turnTools.get(chatKey) === turnTools) this.#turnTools.delete(chatKey);
       // reset() (/new, /forget, /privacy strict) removed this agent mid-turn: don't write the history back.
       const current = this.#agents.get(chatKey) === agent && generation === this.#generation(chatKey);
       if (ephemeral) {
@@ -339,6 +371,11 @@ export class ChatSessions {
         return withSystemExtra(fitBudget(trimContext(recent, CONTEXT_MESSAGES), CONTEXT_CHARS), this.#systemExtra(chatKey));
       },
       sessionId: chatKey,
+      // Tools load_tools added during this turn are offered from the next request on.
+      prepareNextTurnWithContext: ({ context }) => {
+        const tools = this.#turnTools.get(chatKey)?.();
+        return tools ? { context: { ...context, tools } } : undefined;
+      },
     });
     this.#agents.set(chatKey, agent);
     return agent;
@@ -712,4 +749,26 @@ function lastAssistant(messages: readonly AgentMessage[]): AssistantMessage | un
     if (message?.role === "assistant") return message as AssistantMessage;
   }
   return undefined;
+}
+
+const LoadParams = Type.Object({ sets: Type.Array(Type.String(), { description: "Names of the tool sets to load" }) });
+
+/** Lets the model ask for a tool set the question's words didn't bring in. */
+function loadToolsTool(missing: readonly ToolSet[], loaded: Set<string>): AgentTool<typeof LoadParams, undefined> {
+  return {
+    name: "load_tools",
+    label: "Loading tools",
+    description:
+      "More tools exist for tasks your current tools can't do. Load a set when the request needs it, then use its tools. Sets: " +
+      missing.map((set) => `${set.name}: ${set.about}`).join("; "),
+    parameters: LoadParams,
+    execute: async (_id, { sets }) => {
+      const known = sets.filter((name) => missing.some((set) => set.name === name));
+      for (const name of known) loaded.add(name);
+      const tools = missing.filter((set) => known.includes(set.name)).flatMap((set) => set.tools.map((tool) => tool.name));
+      return known.length
+        ? { content: [{ type: "text", text: `Loaded: ${tools.join(", ")}. Use them now.` }], details: undefined }
+        : { content: [{ type: "text", text: `No such set. Sets: ${missing.map((set) => set.name).join(", ")}` }], details: undefined, isError: true };
+    },
+  };
 }
