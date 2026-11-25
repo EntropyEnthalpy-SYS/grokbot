@@ -125,7 +125,7 @@ export function createApp(options: {
     ],
     // Offered only when a question needs them: fewer tools per request keep ordinary answers fast.
     toolSets: (key) => [
-      { name: "files", about: "send_file: send the user a file (Markdown, text, code, config, CSV, Word)", when: FILE_WORDS, tools: [files.tool(key)] },
+      { name: "files", about: "send_file: send a text file you write (Markdown, code, config, CSV, Word); Excel files and charts come from run_code instead", when: FILE_WORDS, tools: [files.tool(key)] },
       { name: "poll", about: "create_poll: post a Telegram poll in this chat", when: POLL_WORDS, tools: [polls.tool(key, confirmFor(key))] },
       ...(code.available
         ? [{ name: "code", about: "run_code: run Python for exact math, statistics, data files (CSV/Excel) and charts", when: CODE_WORDS, tools: [code.tool(key)] }]
