@@ -1,5 +1,5 @@
 import { createWriteStream } from "node:fs";
-import { mkdir, rm, stat } from "node:fs/promises";
+import { mkdir, open, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -37,6 +37,8 @@ export interface BiliOptions {
   maxBytes: number;
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
+  /** Size of each parallel range request (default 8 MB). */
+  chunkBytes?: number;
 }
 
 /** H.264 so every Telegram client plays it; 1080p unless that would be huge. */
@@ -96,11 +98,12 @@ export function candidateUrls(raw: string, hosts: readonly string[] = BILIBILI_C
 /** Size of the sample each candidate host downloads; the fastest host gets the whole stream. */
 const SAMPLE_BYTES = 1024 * 1024;
 
-/**
- * Which host is fast changes (the original was ~30× faster than the rewritten
- * ones on Oct 27, the reverse on Oct 25), so time a sample from each at once.
- */
-async function hostsBySpeed(stream: BiliStream, options: BiliOptions, errors: string[]): Promise<string[]> {
+/** Bilibili's CDN gives each connection ~1–2 MB/s for videos not in its cache; 8 at once gave 5–12 MB/s from SG. */
+const PARALLEL = 8;
+const CHUNK_BYTES = 8 * 1024 * 1024;
+
+/** Which host is fast changes from video to video, so time a sample from each at once. */
+async function hostsBySpeed(stream: BiliStream, options: BiliOptions, errors: string[]): Promise<{ url: string; total?: number }[]> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const timed = await Promise.all(
     candidateUrls(stream.url).map(async (url) => {
@@ -109,29 +112,70 @@ async function hostsBySpeed(stream: BiliStream, options: BiliOptions, errors: st
         const response = await fetchImpl(url, { headers: { ...stream.headers, Range: `bytes=0-${SAMPLE_BYTES - 1}` }, signal: timeout(options.signal, 15_000) });
         if (!response.ok) throw new Error(String(response.status));
         await response.arrayBuffer();
-        return { url, ms: performance.now() - started };
+        const total = /\/(\d+)$/.exec(response.headers.get("content-range") ?? "")?.[1];
+        return { url, total: total ? Number(total) : undefined, ms: performance.now() - started };
       } catch (error) {
         errors.push(`${new URL(url).hostname}: ${(error as Error).message}`);
         return undefined;
       }
     }),
   );
-  return timed.filter((t) => t !== undefined).sort((a, b) => a.ms - b.ms).map((t) => t.url);
+  return timed.filter((t) => t !== undefined).sort((a, b) => a.ms - b.ms);
 }
 
 async function downloadStream(stream: BiliStream, path: string, options: BiliOptions): Promise<void> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const errors: string[] = [];
-  for (const candidate of await hostsBySpeed(stream, options, errors)) {
-    const response = await fetchImpl(candidate, { headers: stream.headers, signal: timeout(options.signal, 15 * 60_000) });
-    if (!response.ok || !response.body) {
-      errors.push(`${new URL(candidate).hostname}: ${response.status}`);
-      continue;
+  for (const { url, total } of await hostsBySpeed(stream, options, errors)) {
+    try {
+      if (total) {
+        await downloadInChunks(url, stream.headers, total, path, options);
+        return;
+      }
+      const response = await fetchImpl(url, { headers: stream.headers, signal: timeout(options.signal, 15 * 60_000) });
+      if (!response.ok || !response.body) throw new Error(String(response.status));
+      await pipeline(Readable.fromWeb(response.body as never), createWriteStream(path));
+      return;
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      errors.push(`${new URL(url).hostname}: ${(error as Error).message}`);
     }
-    await pipeline(Readable.fromWeb(response.body as never), createWriteStream(path));
-    return;
   }
   throw new Error(`no Bilibili CDN host served the stream (${errors.join("; ")})`);
+}
+
+/** Range requests, PARALLEL at a time, each written at its place in the file; a failed chunk is retried twice. */
+async function downloadInChunks(url: string, headers: Record<string, string>, total: number, path: string, options: BiliOptions): Promise<void> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const chunkBytes = options.chunkBytes ?? CHUNK_BYTES;
+  const stop = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, stop.signal]) : stop.signal;
+  const file = await open(path, "w");
+  let next = 0;
+  const worker = async () => {
+    while (next < total) {
+      const start = next;
+      next += chunkBytes;
+      const end = Math.min(start + chunkBytes, total) - 1;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const response = await fetchImpl(url, { headers: { ...headers, Range: `bytes=${start}-${end}` }, signal: timeout(signal, 120_000) });
+          if (response.status !== 206) throw new Error(`HTTP ${response.status} for a range`);
+          const data = Buffer.from(await response.arrayBuffer());
+          if (data.length !== end - start + 1) throw new Error(`got ${data.length} of ${end - start + 1} bytes`);
+          await file.write(data, 0, data.length, start);
+          break;
+        } catch (error) {
+          if (attempt >= 3 || signal.aborted) throw error;
+        }
+      }
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: PARALLEL }, () => worker().catch((error) => (stop.abort(), Promise.reject(error)))));
+  } finally {
+    await file.close();
+  }
 }
 
 function timeout(signal: AbortSignal | undefined, ms: number): AbortSignal {

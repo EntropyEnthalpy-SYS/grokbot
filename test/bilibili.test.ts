@@ -68,6 +68,44 @@ test("downloads each stream from the host that serves a sample fastest, through 
   assert.deepEqual(streams.trim().split("\n").sort(), ["audio", "video"]);
 });
 
+test("parallel range download: chunks finishing out of order and a failed chunk still give the exact file", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bili-"));
+  const video = join(dir, "src-v.mp4");
+  const audio = join(dir, "src-a.m4a");
+  execFileSync("ffmpeg", ["-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10", "-c:v", "libx264", video]);
+  execFileSync("ffmpeg", ["-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=2", "-c:a", "aac", audio]);
+  const meta = {
+    duration: 2,
+    requested_formats: [
+      { url: COSOV, ext: "mp4", vcodec: "avc1", width: 320, height: 240, filesize: 1000 },
+      { url: COSOV.replace("v.m4s", "a.m4s"), ext: "m4a", vcodec: "none", filesize: 1000 },
+    ],
+  };
+  const ytdlp = join(dir, "yt-dlp");
+  writeFileSync(join(dir, "meta.json"), JSON.stringify(meta));
+  writeFileSync(ytdlp, `#!/bin/sh\ncat "${join(dir, "meta.json")}"\n`);
+  chmodSync(ytdlp, 0o755);
+
+  let failedOnce = false;
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (new URL(url).hostname !== "upos-sz-mirrorcosov.bilivideo.com") return new Response("forbidden", { status: 403 });
+    const body = readFileSync(url.includes("v.m4s") ? video : audio);
+    const [start, end] = new Headers(init?.headers).get("range")!.slice(6).split("-").map(Number) as [number, number];
+    if (start === 3000 && !failedOnce) return (failedOnce = true), new Response("busy", { status: 503 });
+    await new Promise((r) => setTimeout(r, Math.random() * 20)); // chunks complete in random order
+    const part = body.subarray(start, Math.min(end, body.length - 1) + 1);
+    return new Response(part, { status: 206, headers: { "content-range": `bytes ${start}-${start + part.length - 1}/${body.length}` } });
+  }) as typeof fetch;
+
+  const out = await downloadBilibili("https://www.bilibili.com/video/BV1", { ytdlp, dir: join(dir, "work"), maxBytes: 10_000_000, fetchImpl, chunkBytes: 1000 });
+  assert.equal(failedOnce, true);
+  // Merging copies packets unchanged, so any misplaced byte would change the decoded picture or sound.
+  const md5 = (file: string, stream: string) => execFileSync("ffmpeg", ["-v", "error", "-i", file, "-map", `0:${stream}`, "-f", "md5", "-"], { encoding: "utf8" });
+  assert.equal(md5(out.path, "v"), md5(video, "v"));
+  assert.equal(md5(out.path, "a"), md5(audio, "a"));
+});
+
 test("refuses videos over the upload limit before downloading anything", async () => {
   const dir = mkdtempSync(join(tmpdir(), "bili-"));
   const ytdlp = join(dir, "yt-dlp");
