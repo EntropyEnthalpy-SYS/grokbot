@@ -18,10 +18,11 @@ import { ParseHubClient, type PhDownload, type PhPost } from "./links/parsehub.t
 import { downloadBilibili } from "./media/bilibili.ts";
 import { LinkReader } from "./links/reader.ts";
 import { browserRenderer } from "./links/browser.ts";
-import { formatSearchResults, searchWebTool, WebSearch } from "./links/search.ts";
+import { CURRENT_WORDS, formatSearchResults, searchQuery, searchWebTool, WebSearch } from "./links/search.ts";
 import { VideoReader } from "./media/video.ts";
 import { installAuthRetry } from "./net/authRetry.ts";
 import { systemPromptFor, today } from "./prompt.ts";
+import { addLocalDays, localDay } from "./time.ts";
 import { GroupStore } from "./telegram/groups.ts";
 
 /** Bilibili: video info through the tunnel, video data straight from Bilibili's CDN. */
@@ -141,6 +142,21 @@ export function createApp(options: {
         ? [{ name: "server", about: "server_run: run shell commands on the owner's servers over SSH (check, diagnose, fix)", when: servers.forKey(key) ? /[\s\S]/ : SERVER_WORDS, tools: [servers.tool(key)] }]
         : []),
     ],
+    // Schedules, prices, news…: results from several sites come with the question, so the answer starts from them.
+    prefetch: search.available
+      ? async (question, key, signal) => {
+          if (!grok.hostedSearch || !CURRENT_WORDS.test(question) || /https?:\/\//.test(question)) return undefined;
+          const zone = groups.timeZone(chatIdOf(key));
+          const now = Date.now();
+          const query = searchQuery(question, {
+            date: localDay(now, zone),
+            tomorrow: localDay(addLocalDays(now, 1, zone), zone),
+            yesterday: localDay(addLocalDays(now, -1, zone), zone),
+          });
+          const results = await search.search(query, { maxResults: 8, signal });
+          return results.length ? formatSearchResults(query, results) : undefined;
+        }
+      : undefined,
     systemExtra: (key) =>
       `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + scriptBlock(groups, chatIdOf(key)) + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key), speakers.get(key)) + servers.promptBlock(key),
   });

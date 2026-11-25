@@ -125,3 +125,18 @@ test("without a search key (or when it fails), ChatGPT/Claude are told they can'
   await failing.grok.ask("SYSTEM", "news", { search: true });
   assert.equal(failing.requests[0]!.system, "SYSTEM" + NO_SEARCH_NOTE);
 });
+
+import { CURRENT_WORDS, searchQuery } from "../src/links/search.ts";
+
+test("time-sensitive questions get a search first; the query names the year or date the question means", () => {
+  const asked = "10月27号，英雄联盟全球总决赛赛程是什么？具体到几点？谁打谁";
+  assert.ok(CURRENT_WORDS.test(asked));
+  for (const q of ["台北明天天氣？", "BTC 现在价格", "what time is the Worlds final", "今晚有什么比赛"]) assert.ok(CURRENT_WORDS.test(q), q);
+  for (const q of ["帮我写一首关于秋天的诗", "explain how TCP works", "哈哈你好笨"]) assert.ok(!CURRENT_WORDS.test(q), q);
+  const today = { date: "2026-10-26", tomorrow: "2026-10-27", yesterday: "2026-10-25" };
+  // Without a year, "10月27号" finds last year's schedule (the bug: Worlds 2025 in Shanghai instead of 2026 in the US).
+  assert.equal(searchQuery(asked, today), `${asked} 2026`);
+  assert.equal(searchQuery("2025 年世界赛冠军是谁", today), "2025 年世界赛冠军是谁");
+  assert.equal(searchQuery("明天几点开赛", today), "明天几点开赛 2026-10-27");
+  assert.equal(searchQuery("what happened yesterday", today), "what happened yesterday 2026-10-25");
+});

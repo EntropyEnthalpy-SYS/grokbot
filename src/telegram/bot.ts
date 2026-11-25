@@ -230,6 +230,8 @@ type ChatTarget = {
   ephemeral?: boolean;
   /** Messages whose documents run_code may open (the question, its album, the message it replies to). */
   attached?: readonly Message[];
+  /** The asker's own words, for the web search run before time-sensitive questions. */
+  question?: string;
 };
 
 /** Commands whose replies only the sender sees in groups (Telegram ephemeral commands, Bot API 10.2). */
@@ -1437,7 +1439,10 @@ export function createBot({
       });
     }
     const attached = message.reply_to_message ? [message.reply_to_message] : [];
-    if (message.text) return background(ctx, () => chat(ctx, { text: replyContext(ctx, message, key) + skills.expand(ctx.chat.id, message.text!).text }, { key, attached }));
+    if (message.text) {
+      const asked = skills.expand(ctx.chat.id, message.text).text;
+      return background(ctx, () => chat(ctx, { text: replyContext(ctx, message, key) + asked }, { key, attached, question: asked }));
+    }
     if (message.photo) {
       return background(ctx, async () => {
         const album = (await albums.complete(message)).filter((m) => m.photo);
@@ -1454,7 +1459,7 @@ export function createBot({
         if (!result?.text) return void (await ctx.reply("🎙️ I couldn't hear any speech in that."));
         usage.record(ctx.chat.id, who(ctx), "voice_sec", voiceOf(message)?.duration ?? 0);
         await ctx.reply(`🎙️ ${result.text}`);
-        await chat(ctx, { text: replyContext(ctx, message, key) + result.text }, { key, speak: true });
+        await chat(ctx, { text: replyContext(ctx, message, key) + result.text }, { key, speak: true, question: result.text });
       });
     }
     if (videoOf(message)) {
@@ -1701,6 +1706,7 @@ export function createBot({
       ephemeral: conversation.ephemeral,
       history: conversation.history,
       attached: [...album, ...(reply ? albums.items(reply) : [])],
+      question: asked,
     });
   }
 
@@ -2083,7 +2089,7 @@ export function createBot({
             streamer.status(activityLine(name));
           },
         },
-        { ephemeral: target.ephemeral, history: target.history },
+        { ephemeral: target.ephemeral, history: target.history, question: target.question },
       );
       if (reply.stopReason === "error") {
         // Logged (no message content) so a failed answer leaves a trace in the journal and /health.

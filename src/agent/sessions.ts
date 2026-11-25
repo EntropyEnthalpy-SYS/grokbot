@@ -37,6 +37,8 @@ export interface TurnOptions {
   ephemeral?: boolean;
   /** Send only the last few questions and answers, none older than this (the stored conversation keeps the rest). */
   history?: { turns: number; maxAgeMs: number };
+  /** The asker's own words (without group context), for the search run before time-sensitive questions. */
+  question?: string;
 }
 
 /** A queued turn whose conversation was cleared (/new, /forget, /disable) before it started. */
@@ -82,6 +84,7 @@ export class ChatSessions {
   /** The running turn's tools, picked up before each request (load_tools adds to them mid-turn). */
   readonly #turnTools = new Map<string, () => AgentTool[]>();
   readonly #systemExtra: (chatKey: string) => string;
+  readonly #prefetch: ((question: string, chatKey: string, signal: AbortSignal) => Promise<string | undefined>) | undefined;
   readonly #retentionMs: number;
   readonly #agents = new Map<string, Agent>();
   /**
@@ -110,6 +113,11 @@ export class ChatSessions {
     toolSets?: (chatKey: string) => ToolSet[];
     /** Appended to the system prompt on every request (e.g. the chat's saved notes); never stored. */
     systemExtra?: (chatKey: string) => string;
+    /**
+     * Web results attached to a question before the model sees it (schedules, prices, news…): the model
+     * answers some of these from memory without searching, and its memory is last year's.
+     */
+    prefetch?: (question: string, chatKey: string, signal: AbortSignal) => Promise<string | undefined>;
     retentionMs?: number;
     stallMs?: number;
   }) {
@@ -120,6 +128,7 @@ export class ChatSessions {
     this.#tools = options.tools ?? (() => []);
     this.#toolSets = options.toolSets ?? (() => []);
     this.#systemExtra = options.systemExtra ?? (() => "");
+    this.#prefetch = options.prefetch;
     this.#retentionMs = options.retentionMs ?? CONVERSATION_RETENTION_MS;
     this.#stallMs = options.stallMs ?? STALL_MS;
   }
@@ -295,7 +304,16 @@ export class ChatSessions {
       if (kept) agent.state.messages = agent.state.messages.map((m) => (m === last ? withText(last, kept) : m));
     };
     try {
-      await agent.prompt(input.text, input.images);
+      let prompt = input.text;
+      if (options.question && this.#prefetch) {
+        const found = await this.#prefetch(options.question, chatKey, AbortSignal.timeout(PREFETCH_MS)).catch(() => undefined);
+        if (found) {
+          handlers.onActivity?.("search_web");
+          toolsUsed.add(LOOKED_UP);
+          prompt = `${input.text}\n\n${found}`;
+        }
+      }
+      await agent.prompt(prompt, input.images);
       afterLastSearch();
       // The model is asked once more when its reply isn't a real answer:
       // - "我查一下。" and nothing else, or no text at all: the bot can't send a second message later;
@@ -610,6 +628,8 @@ export const NO_IMAGE_SENT =
 
 /** Any search or read during a reply; facts stated without one came from the model's memory. */
 const LOOKED_UP = "lookup";
+/** The search before a time-sensitive question: slower than this, the model searches by itself. */
+const PREFETCH_MS = 8000;
 /** Grok's server-side tools (web_search, x_keyword_search, browse_page…). */
 const SEARCHES = /search|browse|^x_/i;
 /** Our tools that look things up. */

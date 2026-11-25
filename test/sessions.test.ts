@@ -666,3 +666,25 @@ test("tool sets: loaded when the question's words call for them, or by the model
   assert.deepEqual(ran, ["run_code"]);
   assert.equal((reply.content[0] as { text: string }).text, "結果是 42");
 });
+
+test("a time-sensitive question reaches Grok with web results found for the asker's own words", { timeout: 5000 }, async () => {
+  const { grok, requests, requested } = gatedGrok();
+  const searched: string[] = [];
+  const sessions = new ChatSessions({
+    db: openDbAt(":memory:"),
+    grok: grok as never,
+    systemPrompt: () => "BASE",
+    prefetch: async (question) => (searched.push(question), "<external_content>Worlds 2026 Swiss Round 3: CFO vs T1</external_content>"),
+  });
+  const answered = sessions.run("tg:-1", { text: "[group chat…]\n公冶高朗: 10月27号赛程？" }, {}, { question: "10月27号赛程？" });
+  await requested(1);
+  requests[0]!.release();
+  await answered;
+  assert.deepEqual(searched, ["10月27号赛程？"], "searched for the question, not the group chat around it");
+  assert.match(requests[0]!.texts, /10月27号赛程？[\s\S]*CFO vs T1/);
+  const plain = sessions.run("tg:-2", { text: "hi" });
+  await requested(2);
+  requests[1]!.release();
+  await plain;
+  assert.equal(searched.length, 1, "no search without the asker's words");
+});
