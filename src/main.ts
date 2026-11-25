@@ -151,7 +151,7 @@ const bot = createBot({
 void (async () => {
   for (let attempt = 1; attempt <= 5; attempt++) {
     try {
-      await registerCommands(bot);
+      await registerCommands(bot, groups.list().map((g) => g.chatId));
       return;
     } catch (error) {
       console.warn(`setMyCommands failed (attempt ${attempt}): ${(error as Error).message.split("\n")[0]}`);

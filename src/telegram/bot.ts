@@ -118,6 +118,7 @@ export const COMMANDS = [
   { command: "deletelink", description: "Delete link-only messages after the card: on | off" },
   { command: "enable", description: "Let the bot work in this group (owner)" },
   { command: "disable", description: "Stop the bot in this group (owner)" },
+  { command: "servers", description: "One topic per server in this forum group (owner)" },
   { command: "login", description: "Sign in with your Grok subscription" },
   { command: "logout", description: "Sign out of Grok" },
   { command: "route", description: "api | proxy | auto (advanced)" },
@@ -2205,7 +2206,13 @@ export function createBot({
   return bot;
 }
 
-export async function registerCommands(bot: Bot): Promise<void> {
+export async function registerCommands(bot: Bot, groupIds: readonly number[] = []): Promise<void> {
+  // Menus another program set with this token (more specific scopes win over ours): private chats, admins, single groups.
+  await bot.api.deleteMyCommands({ scope: { type: "all_private_chats" } });
+  await bot.api.deleteMyCommands({ scope: { type: "all_chat_administrators" } });
+  for (const chatId of groupIds) {
+    await bot.api.deleteMyCommands({ scope: { type: "chat", chat_id: chatId } }).catch(() => undefined);
+  }
   await bot.api.setMyCommands(COMMANDS);
   // In groups, setting and info commands are ephemeral: only the sender sees the command and the answer.
   await bot.api.setMyCommands(
