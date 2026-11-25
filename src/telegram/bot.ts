@@ -35,7 +35,7 @@ import { defaultLanguage } from "../lang.ts";
 import { AUTO_VOICE_MAX_SECONDS, documentOf, TelegramMedia, videoOf, voiceOf } from "./media.ts";
 import { buildXCard, needsTranslation, sendXCard, type XCard } from "../links/xcard.ts";
 import { fetchXPost, type XPost } from "../links/xpost.ts";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { CODE_BUTTON, escapeHtml } from "./format.ts";
@@ -69,6 +69,7 @@ export { sessionKey };
 import { AlbumCollector } from "./albums.ts";
 import { installPuck } from "./puck.ts";
 import type { FileDesk } from "../agent/files.ts";
+import type { CodeDesk, SandboxFile } from "../agent/sandbox.ts";
 import { editParagraphs, openForEdit, wantsEditedFile } from "../media/edit.ts";
 import { isReadableDocument } from "../media/documents.ts";
 import { RateLimiter } from "./rateLimit.ts";
@@ -165,6 +166,8 @@ export interface BotDeps {
   images: ImageStudio;
   /** Files the AI makes with send_file, posted after its answer. */
   files: FileDesk;
+  /** run_code (Python in a locked box); its charts and files are posted after the answer. */
+  code?: CodeDesk;
   memory: MemoryStore;
   usage: UsageStore;
   limits: LimitStore;
@@ -220,6 +223,8 @@ type ChatTarget = {
   history?: { turns: number; maxAgeMs: number };
   /** A focused group's question that carries the group chat: the conversation is never stored. */
   ephemeral?: boolean;
+  /** Messages whose documents run_code may open (the question, its album, the message it replies to). */
+  attached?: readonly Message[];
 };
 
 /** Commands whose replies only the sender sees in groups (Telegram ephemeral commands, Bot API 10.2). */
@@ -239,6 +244,7 @@ export function createBot({
   skills,
   images,
   files,
+  code,
   memory,
   speakers,
   usage,
@@ -1309,10 +1315,11 @@ export function createBot({
     if (message.text && repliedFile) {
       return background(ctx, async () => {
         if (await wantsEditedFile(ask, message.text!)) return editFile(ctx, message, repliedFile, message.text!, 0);
-        await chat(ctx, { text: replyContext(ctx, message, key) + skills.expand(ctx.chat!.id, message.text!).text }, { key });
+        await chat(ctx, { text: replyContext(ctx, message, key) + skills.expand(ctx.chat!.id, message.text!).text }, { key, attached: [message.reply_to_message!] });
       });
     }
-    if (message.text) return background(ctx, () => chat(ctx, { text: replyContext(ctx, message, key) + skills.expand(ctx.chat.id, message.text!).text }, { key }));
+    const attached = message.reply_to_message ? [message.reply_to_message] : [];
+    if (message.text) return background(ctx, () => chat(ctx, { text: replyContext(ctx, message, key) + skills.expand(ctx.chat.id, message.text!).text }, { key, attached }));
     if (message.photo) {
       return background(ctx, async () => {
         const album = (await albums.complete(message)).filter((m) => m.photo);
@@ -1341,7 +1348,12 @@ export function createBot({
       });
     }
     if (message.document) {
-      if (!documentOf(message)) return ctx.reply("I can read PDF, Word (.docx), PowerPoint (.pptx), OpenDocument and text files.");
+      // Spreadsheets aren't read as text: the AI opens them with run_code.
+      if (code?.available && isSpreadsheet(message.document.file_name)) {
+        const question = message.caption || "Look at this spreadsheet with run_code: what does it contain? Summarize the main numbers.";
+        return background(ctx, () => chat(ctx, { text: `${question}\n\n(Attached: ${message.document!.file_name})` }, { key, attached: [message] }));
+      }
+      if (!documentOf(message)) return ctx.reply("I can read PDF, Word (.docx), PowerPoint (.pptx), OpenDocument, spreadsheets and text files.");
       return background(ctx, async () => {
         if (message.caption && editableFile(message) && (await wantsEditedFile(ask, message.caption))) {
           return editFile(ctx, message, message, message.caption, 0);
@@ -1350,7 +1362,7 @@ export function createBot({
         const doc = await media.document(message).finally(() => typing.stop());
         if (!doc) return;
         const question = message.caption || (doc.text ? DOCUMENT_SUMMARY_REQUEST : "What's in this image?");
-        await chat(ctx, { text: `${question}\n\n${untrusted(`document: ${doc.name}`, documentPrompt(doc))}`, images: doc.images }, { key });
+        await chat(ctx, { text: `${question}\n\n${untrusted(`document: ${doc.name}`, documentPrompt(doc))}`, images: doc.images }, { key, attached: [message] });
       });
     }
     return ctx.reply("I can read text, links, photos, voice messages, videos and documents (PDF, Word, PowerPoint, text).");
@@ -1395,6 +1407,15 @@ export function createBot({
         background(ctx, () => answers.use(() => answerInGroup(ctx, message, threadId)));
       },
     });
+  }
+
+  /** Documents of these messages for run_code: named now, downloaded only if code runs. */
+  function attachedFiles(messages: readonly Message[]): { names: string[]; load: () => Promise<SandboxFile[]> } {
+    const docs = messages.filter((m, i) => m.document && messages.findIndex((o) => o.message_id === m.message_id) === i);
+    return {
+      names: docs.map((m) => m.document!.file_name ?? "file"),
+      load: () => Promise.all(docs.map(async (m) => ({ name: m.document!.file_name ?? "file", data: await media.withDocument(m, (path) => readFile(path)) }))),
+    };
   }
 
   function onGroupMessage(ctx: Context, message: Message): void {
@@ -1558,6 +1579,7 @@ export function createBot({
       speak,
       ephemeral: conversation.ephemeral,
       history: conversation.history,
+      attached: [...album, ...(reply ? albums.items(reply) : [])],
     });
   }
 
@@ -1899,6 +1921,7 @@ export function createBot({
     let ids: number[] = [];
     let imageTurn: ReturnType<ImageStudio["begin"]> | undefined;
     let fileTurn: ReturnType<FileDesk["begin"]> | undefined;
+    let codeTurn: ReturnType<CodeDesk["begin"]> | undefined;
     let toolsUsed = false;
     // This turn's author for the remember tool. The next question in the chat may start before this
     // one's cleanup runs, so cleanup removes only our own entry.
@@ -1917,6 +1940,7 @@ export function createBot({
             began = Date.now();
             imageTurn = images.begin(target.key, { userId: ctx.from?.id, unlimited: isOwner(ctx), attached: input.images });
             fileTurn = files.begin(target.key);
+            codeTurn = code?.begin(target.key, attachedFiles(target.attached ?? []));
             speakers.set(target.key, speaker);
           },
           onText: (text) => {
@@ -1971,7 +1995,12 @@ export function createBot({
         await ctx.reply(`⚠️ Couldn't post the image: ${errorMessage(error)}`).catch(() => undefined);
       });
       if (created.length) usage.record(chatId, who(ctx), "image", created.length);
-      for (const file of fileTurn ? files.end(fileTurn) : []) {
+      const made = codeTurn && code ? code.end(codeTurn) : [];
+      const charts = made.filter((file) => /\.(png|jpe?g|webp)$/i.test(file.name));
+      await postImages(chatId, charts.map((file) => file.data), target.replyTo, target.threadId).catch(async (error) => {
+        await ctx.reply(`⚠️ Couldn't post the chart: ${errorMessage(error)}`).catch(() => undefined);
+      });
+      for (const file of [...(fileTurn ? files.end(fileTurn) : []), ...made.filter((file) => !charts.includes(file))]) {
         await bot.api
           .sendDocument(chatId, new InputFile(file.data, file.name), {
             ...(target.replyTo ? { reply_parameters: { message_id: target.replyTo, allow_sending_without_reply: true } } : {}),
@@ -2100,6 +2129,10 @@ export function privacyText(mode: PrivacyMode): string {
  * The message being replied to, ignoring the forum quirk where every message in
  * a topic "replies" to the topic's creation message.
  */
+function isSpreadsheet(name = ""): boolean {
+  return /\.(xlsx|xlsm|xls|ods)$/i.test(name);
+}
+
 function realReply(message: Message): Message | undefined {
   const reply = message.reply_to_message;
   if (!reply) return undefined;

@@ -44,6 +44,13 @@ for f in SC/NotoSansSC-Regular.otf SC/NotoSansSC-Bold.otf TC/NotoSansTC-Regular.
 done
 chmod 644 "$fonts"/* 2>/dev/null || true
 
+# run_code: bubblewrap for the locked box, and a Python environment for data and charts (no network inside the box).
+command -v bwrap >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bubblewrap >/dev/null; }
+if [ ! -x /opt/pysandbox/bin/python ] || ! /opt/pysandbox/bin/python -c "import pandas, matplotlib, openpyxl, sympy" 2>/dev/null; then
+  python3 -m venv /opt/pysandbox
+  /opt/pysandbox/bin/pip install --quiet --upgrade pip numpy pandas matplotlib openpyxl xlrd odfpy sympy
+fi
+
 # yt-dlp in its own venv (with curl_cffi for browser impersonation), updated daily.
 if [ ! -x /opt/yt-dlp/bin/yt-dlp ]; then
   python3 -m venv /opt/yt-dlp

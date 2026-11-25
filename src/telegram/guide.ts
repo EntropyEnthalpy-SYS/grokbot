@@ -24,6 +24,7 @@ In a group it stays quiet until addressed: <b>@mention</b> it, <b>reply</b> to o
 • <code>grok, 提醒我們週五晚上8點開會</code> → reminder
 • <code>grok, 記住小明吃素</code> → a note it always remembers
 • <code>grok, 記住我吃素</code> → a note about you, used whenever you ask (<code>/lm me</code>)
+• <code>grok 算一下…</code>, or a CSV/Excel file with <code>grok 做个图表</code> → exact math, statistics and charts (Python in a locked box)
 • <code>grok, 開個投票：晚餐吃什麼 拉麵/火鍋/壽司</code> → a poll
   In groups, notes and polls first appear as a preview: the person who asked taps ✅ (or ✖️).
 • a voice message starting with “grok, …” → answer in text and voice

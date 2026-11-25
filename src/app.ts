@@ -1,5 +1,6 @@
 import { ChatSessions } from "./agent/sessions.ts";
 import { FileDesk } from "./agent/files.ts";
+import { CodeDesk, CodeRunner } from "./agent/sandbox.ts";
 import { groupChatTool, readLinkTool, searchChatTool, watchVideoTool } from "./agent/tools.ts";
 import { ImageStudio } from "./agent/images.ts";
 import { MemoryStore } from "./memory.ts";
@@ -45,6 +46,8 @@ export interface App {
   parsehub?: ParseHubClient;
   images: ImageStudio;
   files: FileDesk;
+  /** run_code: Python in a locked box (when bubblewrap and the Python environment are installed). */
+  code: CodeDesk;
   memory: MemoryStore;
   polls: PollDesk;
   /** AI-suggested notes and polls waiting for a person's ✅ (groups with confirmations on). */
@@ -65,6 +68,9 @@ export function createApp(options: {
   ytdlpProxy?: string;
   parsehubUrl?: string;
   mediaDir?: string;
+  /** Python environment for run_code (default /opt/pysandbox). */
+  sandboxVenv?: string;
+  fontDir?: string;
 }): App {
   if (!authRetryInstalled) {
     installAuthRetry();
@@ -87,6 +93,9 @@ export function createApp(options: {
   const images = new ImageStudio((request) => grok.createImage(request), () => limits.get("imagesPerUserDay"));
   const polls = new PollDesk();
   const files = new FileDesk();
+  const code = new CodeDesk(
+    new CodeRunner({ venv: options.sandboxVenv ?? "/opt/pysandbox", workRoot: join(options.dataDir, "sandbox"), fontDir: options.fontDir }),
+  );
   const memory = new MemoryStore(db);
   const speakers = new Map<string, { userId?: number; userName: string }>();
   const actions = new ActionDesk();
@@ -115,16 +124,22 @@ export function createApp(options: {
     toolSets: (key) => [
       { name: "files", about: "send_file: send the user a file (Markdown, text, code, config, CSV, Word)", when: FILE_WORDS, tools: [files.tool(key)] },
       { name: "poll", about: "create_poll: post a Telegram poll in this chat", when: POLL_WORDS, tools: [polls.tool(key, confirmFor(key))] },
+      ...(code.available
+        ? [{ name: "code", about: "run_code: run Python for exact math, statistics, data files (CSV/Excel) and charts", when: CODE_WORDS, tools: [code.tool(key)] }]
+        : []),
     ],
     systemExtra: (key) =>
       `\n${today(new Date(), groups.timeZone(chatIdOf(key)))}` + scriptBlock(groups, chatIdOf(key)) + personaBlock(groups, chatIdOf(key)) + memory.promptBlock(chatIdOf(key), speakers.get(key)),
   });
-  return { db, grok, sessions, groups, reader, video, parsehub, images, files, memory, speakers, polls, actions, limits };
+  return { db, grok, sessions, groups, reader, video, parsehub, images, files, code, memory, speakers, polls, actions, limits };
 }
 
 /** Questions that want a file or a poll load those tools up front (the model can still load them itself). */
 const FILE_WORDS = /文件|檔案|档案|附件|下载|下載|导出|導出|匯出|\.(md|csv|docx|txt|json|ya?ml|sh|py)\b|\b(file|download|export|markdown)\b/i;
 const POLL_WORDS = /投票|表决|表決|\b(poll|vote)\b/i;
+/** Math, statistics, data files and charts (not "画一张图", which is create_image). */
+const CODE_WORDS =
+  /计算|計算|算一下|算算|算出|统计|統計|平均|中位数|中位數|方差|标准差|標準差|概率|機率|几率|復利|复利|回归|迴歸|图表|圖表|折线图|折線圖|柱状图|柱狀圖|饼图|圓餅圖|曲线图|曲線圖|表格|excel|xlsx|csv|python|代码|代碼|\b(calculate|compute|statistics|average|median|chart|plot|graph|regression|spreadsheet)\b/i;
 
 /** The group's Chinese script (/lang zh-cn or zh-tw): cards use it, so answers in Chinese should too. */
 function scriptBlock(groups: GroupStore, chatId: number): string {

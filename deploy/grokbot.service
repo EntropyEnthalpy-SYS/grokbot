@@ -20,7 +20,8 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/grokbot
-MemoryMax=1G
+# Room for run_code's box (1 GB at most, one at a time) next to the bot.
+MemoryMax=2G
 
 [Install]
 WantedBy=multi-user.target

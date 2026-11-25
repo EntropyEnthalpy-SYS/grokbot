@@ -15,6 +15,7 @@ import { GroupStore } from "../src/telegram/groups.ts";
 import { ReminderStore } from "../src/reminders.ts";
 import { WatchStore } from "../src/watches.ts";
 import { FileDesk } from "../src/agent/files.ts";
+import { CodeDesk } from "../src/agent/sandbox.ts";
 import { SkillStore } from "../src/skills.ts";
 import { ImageStudio } from "../src/agent/images.ts";
 import { MemoryStore } from "../src/memory.ts";
@@ -55,7 +56,7 @@ function harness(
     agent?: (
       images: ImageStudio,
       key: string,
-      extra: { memory: MemoryStore; speakers: Map<string, { userId?: number; userName: string }>; polls: PollDesk; confirm: Confirmer; files: FileDesk },
+      extra: { memory: MemoryStore; speakers: Map<string, { userId?: number; userName: string }>; polls: PollDesk; confirm: Confirmer; files: FileDesk; code: CodeDesk },
     ) => Promise<string | { text: string; stopReason?: string; usedTool?: boolean }>;
   } = {},
 ) {
@@ -71,6 +72,15 @@ function harness(
   const permissions = new PermissionStore(db);
   const polls = new PollDesk();
   const files = new FileDesk();
+  /** run_code without the box: records what it was given and "saves" a chart. */
+  const ranCode: { code: string; inputs: { name: string; data: string }[] }[] = [];
+  const code = new CodeDesk({
+    available: true,
+    run: async (source: string, inputs: { name: string; data: Buffer }[]) => {
+      ranCode.push({ code: source, inputs: inputs.map((i) => ({ name: i.name, data: i.data.toString() })) });
+      return { stdout: "mean 10.7", stderr: "", exitCode: 0, timedOut: false, ms: 5, files: [{ name: "chart.png", data: Buffer.from("png") }] };
+    },
+  } as never);
   const actions = new ActionDesk();
   const speakers = new Map<string, { userId?: number; userName: string }>();
   const created: { prompt: string; sources: number }[] = [];
@@ -90,7 +100,7 @@ function harness(
       runs.push({ key, ephemeral: turn.ephemeral, history: turn.history, text: input.text, images: input.images?.length ?? 0 });
       handlers.onStart?.();
       const confirm = confirmerFor({ actions, confirmActions: (chatId) => groups.confirmActions(chatId), speakers }, key);
-      const out = options.agent ? await options.agent(images, key, { memory, speakers, polls, confirm, files }) : "ok";
+      const out = options.agent ? await options.agent(images, key, { memory, speakers, polls, confirm, files, code }) : "ok";
       const { text, stopReason = "stop", usedTool = false } = typeof out === "string" ? { text: out } : out;
       if (usedTool) (handlers as { onTool?: (name: string) => void }).onTool?.("create_poll");
       return { role: "assistant", content: text ? [{ type: "text", text }] : [], stopReason };
@@ -132,6 +142,7 @@ function harness(
     skills,
     images,
     files,
+    code,
     memory,
     speakers,
     usage,
@@ -216,7 +227,7 @@ function harness(
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   };
-  return { bot, puck, puckCalls, calls, runs, until, waitFor, press, actions, groups, reminders, watches, skills, memory, speakers, usage, limits, permissions, polls, asked, created, images, groupText, settle, next: () => ++updateId };
+  return { ranCode, bot, puck, puckCalls, calls, runs, until, waitFor, press, actions, groups, reminders, watches, skills, memory, speakers, usage, limits, permissions, polls, asked, created, images, groupText, settle, next: () => ++updateId };
 }
 
 test("inline queries reach their handler (they have no chat, unlike every other update)", async () => {
@@ -889,6 +900,31 @@ test("/topic: Puck opens a topic with the question, the bot answers in it, and f
   assert.equal(h.puckCalls.filter((c) => c.method === "createForumTopic").length, before);
   assert.ok(h.puckCalls.some((c) => String(c.payload.text).includes("Only the owner and trusted members")));
   assert.ok(h.puckCalls.some((c) => String(c.payload.text).includes("doesn't have Topics")));
+});
+
+test("run_code gets the files of the question and the message it replies to; its chart is posted after the answer", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "code-"));
+  writeFileSync(join(dir, "sales.xlsx"), "fake-xlsx-bytes"); // a spreadsheet: only run_code opens it
+  let description = "";
+  const h = harness({
+    loggedIn: true,
+    files: { xlsx1: join(dir, "sales.xlsx") },
+    agent: async (_images, key, { code }) => {
+      const tool = code.tool(key);
+      description = tool.description;
+      const result = await tool.execute("c1", { code: "import pandas as pd; print(pd.read_excel('sales.xlsx').mean())" });
+      assert.match((result.content[0] as { text: string }).text, /mean 10\.7[\s\S]*Saved \(posted after your reply\): chart\.png/);
+      return "平均销量 10.7";
+    },
+  });
+  h.groups.enable(GROUP, "Grok bot test");
+  const sheet = { message_id: 50, date: 0, chat: { id: GROUP, type: "supergroup" }, from: { id: 5, is_bot: false, first_name: "A" }, document: { file_id: "xlsx1", file_unique_id: "u1", file_name: "sales.xlsx" } };
+  await h.bot.handleUpdate(h.groupText(5, "grok 统计一下平均销量", { reply_to_message: sheet }));
+  await h.until((c) => c.method === "sendPhoto");
+  assert.match(description, /current folder: sales\.xlsx/);
+  assert.deepEqual(h.ranCode[0]!.inputs, [{ name: "sales.xlsx", data: "fake-xlsx-bytes" }]);
+  const replyTo = (method: string) => (h.calls.find((c) => c.method === method)!.payload.reply_parameters as { message_id: number }).message_id;
+  assert.equal(replyTo("sendPhoto"), replyTo("sendMessage"), "the chart goes under the question, like the answer");
 });
 
 test("an admin posting anonymously is answered; other bots are not", async () => {
